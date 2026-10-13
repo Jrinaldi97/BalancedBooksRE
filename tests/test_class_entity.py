@@ -384,7 +384,7 @@ def test_the_class_routes_hand_their_query_to_the_page():
 def test_the_page_is_wired_in():
     index = (ROOT / "index.html").read_text(encoding="utf-8")
     assert '<script src="/static/js/classes.js"></script>' in index
-    assert 'href="#/classes" class="nav-link" data-page="classes"' in index
+    assert 'href="#/portfolio/setup"' in index  # Portfolio entity/property navigation
     src = (JS / "classes.js").read_text(encoding="utf-8")
     # a change on the page replaces the address; the pages open by address
     assert "history.replaceState(history.state, '', url)" in src

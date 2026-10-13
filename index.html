@@ -3,9 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Slowbooks Pro 2026</title>
+    <title>BalancedBooksRE</title>
     <link rel="stylesheet" href="/static/css/style.css">
     <link rel="stylesheet" href="/static/css/dark.css">
+    <link rel="stylesheet" href="/static/css/portfolio.css">
 </head>
 <body>
     <!-- ================================================================
@@ -13,13 +14,13 @@
          ================================================================ -->
     <div id="splash" class="splash-overlay">
         <div class="splash-box">
-            <div class="splash-title">Slowbooks Pro</div>
+            <div class="splash-title">BalancedBooksRE</div>
             <div class="splash-subtitle">2026 Edition</div>
             <div class="splash-divider"></div>
             <div class="splash-info">
                 <strong>Free &amp; source-available</strong> &mdash; no caps, no subscriptions<br>
-                Born as an independent replacement for QuickBooks&nbsp;Pro&nbsp;2003<br>
-                after Intuit&rsquo;s activation servers died.
+                Real-estate books organized around entities, properties and bank activity.<br>
+                A customized fork for internal business use.
             </div>
             <div class="splash-whatsnew" id="splash-whatsnew" hidden>
                 <div class="splash-whatsnew-title" id="splash-whatsnew-title"></div>
@@ -35,9 +36,9 @@
                 </ul>
             </div>
             <div class="splash-legal">
-                Independent reimplementation built from published SDK<br>
-                documentation (QBFC 5.0) and 14 years as a paying customer.<br>
-                Not affiliated with Intuit Inc.
+                SlowBooks Pro 2026 — originally created by Trent Von Holten<br>
+                BalancedBooksRE is an independently modified fork.<br>
+                Copyright (c) 2026 Trent Von Holten. Original license retained.
             </div>
             <button class="splash-btn" id="splash-dismiss">OK</button>
         </div>
@@ -51,7 +52,7 @@
         <a href="#page-content" class="skip-link">Skip to main content</a>
         <!-- Toolbar -->
         <div id="topbar">
-            <div class="topbar-brand">Slowbooks Pro <span>2026</span></div>
+            <div class="topbar-brand">BalancedBooksRE <span>2026</span></div>
             <!-- Back, within the app: enabled while an app page is behind
                  (app.js App.canGoBack); the desktop window has no Back of
                  its own. Shortcut and title are set per platform at start.
@@ -63,14 +64,10 @@
             <div class="topbar-company" id="topbar-company" title="Company file in use"></div>
             <div class="tb-sep"></div>
             <button class="tb-btn" data-nav="#/">Home</button>
-            <button class="tb-btn" data-action="CustomersPage.showForm">New Customer</button>
-            <button class="tb-btn" data-action="InvoicesPage.showForm">Create Invoice</button>
-            <button class="tb-btn" data-action="PaymentsPage.showForm">Receive Payment</button>
-            <button class="tb-btn" data-nav="#/quick-entry">Quick Entry</button>
-            <div class="tb-sep"></div>
-            <button class="tb-btn" data-nav="#/reports">Reports</button>
-            <div class="tb-sep"></div>
-            <input type="text" id="global-search" class="tb-search" placeholder="Search customers, invoices...">
+            <button class="tb-btn" data-nav="#/portfolio/activity">Bank activity</button>
+            <button class="tb-btn" data-nav="#/portfolio/review">Needs review</button>
+            <button class="tb-btn" data-nav="#/portfolio/reports">Statements</button>
+            <input type="text" id="global-search" class="tb-search" hidden aria-label="Legacy search">
             <div id="search-results" class="search-dropdown hidden"></div>
             <div class="topbar-right">
                 <button class="tb-btn" id="theme-toggle" title="Toggle Dark Mode">&#9788;</button>
@@ -84,7 +81,7 @@
         <div id="main-area">
             <nav id="sidebar" aria-label="Main menu">
                 <div class="sidebar-header">
-                    <h1>Slowbooks Pro</h1>
+                    <h1>BalancedBooksRE</h1>
                     <div class="sidebar-edition">2026 Edition · <span id="app-version">…</span></div>
                     <!-- The update notice lives here, at the top, because in
                          the footer it was only seen by someone who scrolled
@@ -93,122 +90,13 @@
                     <div id="sidebar-update"></div>
                 </div>
                 <ul class="nav-links">
-                    <li><a href="#/" class="nav-link active" data-page="dashboard">
-                        <span class="nav-icon" aria-hidden="true">&#9632;</span> Dashboard</a></li>
-
-                    <li class="nav-section">Customers & Sales</li>
-                    <li><a href="#/customers" class="nav-link" data-page="customers">
-                        <span class="nav-icon" aria-hidden="true">&#9679;</span> Customers</a></li>
-                    <li><a href="#/jobs" class="nav-link" data-page="jobs">
-                        <span class="nav-icon" aria-hidden="true">&#9874;</span> Jobs</a></li>
-                    <li><a href="#/invoices" class="nav-link" data-page="invoices">
-                        <span class="nav-icon" aria-hidden="true">&#9830;</span> Invoices</a></li>
-                    <li><a href="#/sales-receipts" class="nav-link" data-page="sales-receipts">
-                        <span class="nav-icon" aria-hidden="true">&#9635;</span> Sales Receipts</a></li>
-                    <li data-nonprofit hidden><a href="#/in-kind-gifts" class="nav-link" data-page="in-kind-gifts">
-                        <span class="nav-icon" aria-hidden="true">&#127873;</span> In-Kind Gifts</a></li>
-                    <li><a href="#/estimates" class="nav-link" data-page="estimates">
-                        <span class="nav-icon" aria-hidden="true">&#9826;</span> Estimates</a></li>
-                    <li><a href="#/payments" class="nav-link" data-page="payments">
-                        <span class="nav-icon" aria-hidden="true">&#9733;</span> Payments</a></li>
-                    <li><a href="#/recurring" class="nav-link" data-page="recurring">
-                        <span class="nav-icon" aria-hidden="true">&#8634;</span> Recurring Invoices</a></li>
-                    <li><a href="#/credit-memos" class="nav-link" data-page="credit-memos">
-                        <span class="nav-icon" aria-hidden="true">&#8722;</span> Credit Memos</a></li>
-                    <!-- data-write: a page that only enters things. A read-only
-                         sign-in is not offered it (app.js App.setRole). -->
-                    <li data-write><a href="#/batch-payments" class="nav-link" data-page="batch-payments">
-                        <span class="nav-icon" aria-hidden="true">&#10003;</span> Batch Payments</a></li>
-
-                    <li class="nav-section">Vendors & Payables</li>
-                    <li><a href="#/vendors" class="nav-link" data-page="vendors">
-                        <span class="nav-icon" aria-hidden="true">&#9670;</span> Vendors</a></li>
-                    <li><a href="#/purchase-orders" class="nav-link" data-page="purchase-orders">
-                        <span class="nav-icon" aria-hidden="true">&#9997;</span> Purchase Orders</a></li>
-                    <li><a href="#/bills" class="nav-link" data-page="bills">
-                        <span class="nav-icon" aria-hidden="true">&#9830;</span> Bills</a></li>
-                    <li><a href="#/vendor-credits" class="nav-link" data-page="vendor-credits">
-                        <span class="nav-icon" aria-hidden="true">&#8722;</span> Vendor Credits</a></li>
-                    <li><a href="#/job-costs" class="nav-link" data-page="job-costs">
-                        <span class="nav-icon" aria-hidden="true">&#9874;</span> Job Costs</a></li>
-                    <li><a href="#/expenses" class="nav-link" data-page="expenses">
-                        <span class="nav-icon" aria-hidden="true">&#9873;</span> Expenses</a></li>
-
-                    <li class="nav-section">Manage</li>
-                    <li><a href="#/items" class="nav-link" data-page="items">
-                        <span class="nav-icon" aria-hidden="true">&#9642;</span> Items & Services</a></li>
-                    <li><a href="#/employees" class="nav-link" data-page="employees">
-                        <span class="nav-icon" aria-hidden="true">&#9786;</span> Employees</a></li>
-                    <li><a href="#/payroll" class="nav-link" data-page="payroll">
-                        <span class="nav-icon" aria-hidden="true">&#9733;</span> Payroll</a></li>
-
-                    <li class="nav-section">Payroll &amp; HR</li>
-                    <li><a href="#/hr/onboarding" class="nav-link" data-page="hr-onboarding">
-                        <span class="nav-icon" aria-hidden="true">&#9654;</span> Onboarding</a></li>
-                    <li><a href="#/hr/time-entries" class="nav-link" data-page="hr-time-entries">
-                        <span class="nav-icon" aria-hidden="true">&#9201;</span> Time Entries</a></li>
-                    <li><a href="#/hr/pto" class="nav-link" data-page="hr-pto">
-                        <span class="nav-icon" aria-hidden="true">&#9788;</span> Time Off</a></li>
-                    <li><a href="#/hr/benefits" class="nav-link" data-page="hr-benefits">
-                        <span class="nav-icon" aria-hidden="true">&#8722;</span> Benefits</a></li>
-                    <li><a href="#/hr/deductions" class="nav-link" data-page="hr-deductions">
-                        <span class="nav-icon" aria-hidden="true">&#8722;</span> Garnishments</a></li>
-                    <li><a href="#/hr/tax-forms" class="nav-link" data-page="hr-tax-forms">
-                        <span class="nav-icon" aria-hidden="true">&#9783;</span> Tax Forms</a></li>
-                    <li><a href="#/reseller-permits" class="nav-link" data-page="reseller-permits">
-                        <span class="nav-icon" aria-hidden="true">&#9982;</span> Reseller Permits</a></li>
-
-                    <li class="nav-section">Banking</li>
-                    <li><a href="#/banking" class="nav-link" data-page="banking">
-                        <span class="nav-icon" aria-hidden="true">&#9638;</span> Bank Accounts</a></li>
-                    <li><a href="#/bank-rules" class="nav-link" data-page="bank-rules">
-                        <span class="nav-icon" aria-hidden="true">&#9889;</span> Bank Rules</a></li>
-                    <li><a href="#/fixed-assets" class="nav-link" data-page="fixed-assets">
-                        <span class="nav-icon" aria-hidden="true">&#127970;</span> Fixed Assets</a></li>
-                    <li data-write><a href="#/opening-balances" class="nav-link" data-page="opening-balances">
-                        <span class="nav-icon" aria-hidden="true">&#9878;</span> Opening Balances</a></li>
-                    <li data-write><a href="#/migrate" class="nav-link" data-page="migrate">
-                        <span class="nav-icon" aria-hidden="true">&#10515;</span> Migrate Data</a></li>
-                    <li><a href="#/deposits" class="nav-link" data-page="deposits">
-                        <span class="nav-icon" aria-hidden="true">&#9660;</span> Make Deposits</a></li>
-                    <li><a href="#/cc-charges" class="nav-link" data-page="cc-charges">
-                        <span class="nav-icon" aria-hidden="true">&#9830;</span> CC Charges</a></li>
-
-                    <li class="nav-section">Accounting</li>
-                    <li><a href="#/accounts" class="nav-link" data-page="accounts">
-                        <span class="nav-icon" aria-hidden="true">&#9776;</span> Chart of Accounts</a></li>
-                    <li><a href="#/journal" class="nav-link" data-page="journal">
-                        <span class="nav-icon" aria-hidden="true">&#9998;</span> Journal Entries</a></li>
-                    <li><a href="#/classes" class="nav-link" data-page="classes">
-                        <span class="nav-icon" aria-hidden="true">&#9641;</span> Classes</a></li>
-                    <li data-nonprofit hidden><a href="#/releases" class="nav-link" data-page="releases">
-                        <span class="nav-icon" aria-hidden="true">&#8646;</span> Releases from Restriction</a></li>
-                    <li data-nonprofit hidden><a href="#/functional-allocations" class="nav-link" data-page="functional-allocations">
-                        <span class="nav-icon" aria-hidden="true">&#9707;</span> Functional Allocations</a></li>
-                    <li><a href="#/budgets" class="nav-link" data-page="budgets">
-                        <span class="nav-icon" aria-hidden="true">&#9783;</span> Budgets</a></li>
-                    <li><a href="#/reports" class="nav-link" data-page="reports">
-                        <span class="nav-icon" aria-hidden="true">&#9783;</span> Reports</a></li>
-                    <li><a href="#/analytics" class="nav-link" data-page="analytics">
-                        <span class="nav-icon" aria-hidden="true">&#9650;</span> Analytics &amp; AI</a></li>
-                    <li><a href="#/tax" class="nav-link" data-page="tax">
-                        <span class="nav-icon" aria-hidden="true">&#9783;</span> Tax Reports</a></li>
-
-                    <li class="nav-section">Interop</li>
-                    <li><a href="#/iif" class="nav-link" data-page="iif">
-                        <span class="nav-icon" aria-hidden="true">&#8644;</span> QuickBooks Interop</a></li>
-                    <li><a href="#/qbo" class="nav-link" data-page="qbo">
-                        <span class="nav-icon" aria-hidden="true">&#9729;</span> QuickBooks Online</a></li>
-                    <li><a href="#/csv" class="nav-link" data-page="csv">
-                        <span class="nav-icon" aria-hidden="true">&#8644;</span> CSV Import/Export</a></li>
-
-                    <li class="nav-section">System</li>
-                    <li><a href="#/settings" class="nav-link" data-page="settings">
-                        <span class="nav-icon" aria-hidden="true">&#9881;</span> Settings</a></li>
-                    <li><a href="#/audit" class="nav-link" data-page="audit">
-                        <span class="nav-icon" aria-hidden="true">&#9783;</span> Audit Log</a></li>
-                    <li><a href="#/companies" class="nav-link" data-page="companies">
-                        <span class="nav-icon" aria-hidden="true">&#9632;</span> Companies</a></li>
+                    <li><a href="#/" class="nav-link" data-page="dashboard">Portfolio overview</a></li>
+                    <li><a href="#/portfolio/activity" class="nav-link" data-page="portfolio-activity">Bank activity</a></li>
+                    <li><a href="#/portfolio/review" class="nav-link" data-page="portfolio-review">Needs review</a></li>
+                    <li><a href="#/portfolio/reports" class="nav-link" data-page="portfolio-reports">Financial statements</a></li>
+                    <li><a href="#/portfolio/setup" class="nav-link" data-page="portfolio-setup">Entities & properties</a></li>
+                    <li><a href="#/settings" class="nav-link" data-page="settings">Settings & backups</a></li>
+                    <li><a href="#/audit" class="nav-link" data-page="audit">Audit history</a></li>
                 </ul>
                 <div class="sidebar-footer" id="sidebar-footer">
                     <!-- External URL: the desktop shim only intercepts
@@ -216,7 +104,7 @@
                          system browser (same path as the update badge). -->
                     <a href="https://github.com/VonHoltenCodes/SlowBooks-Pro-2026/discussions/39"
                        target="_blank" rel="noopener" class="footer-link">Using SlowBooks for real work? Tell us &rarr;</a>
-                    <span id="app-version-footer">Slowbooks Pro 2026</span><br>
+                    <span id="app-version-footer">BalancedBooksRE</span><br>
                     &copy; 2026 Slowbooks
                 </div>
             </nav>
@@ -317,6 +205,7 @@
     <script src="/static/js/opening_balances.js"></script>
     <script src="/static/js/budgets.js"></script>
     <!-- App must be last -->
+    <script src="/static/js/portfolio.js"></script>
     <script src="/static/js/app.js"></script>
     <!-- Static-page event wiring (replaces what used to be inline onclick=) -->
     <script src="/static/js/bootstrap.js"></script>

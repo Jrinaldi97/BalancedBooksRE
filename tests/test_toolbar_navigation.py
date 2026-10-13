@@ -47,7 +47,7 @@ def test_a_toolbar_button_moves_the_address_with_the_page():
     steps = _steps()
     assert steps["start-on-settings"]["rendered"] == ["SettingsPage"]
     for step, page, address in (
-        ("toolbar-home", "DashboardPage", "#/"),
+        ("toolbar-home", "PortfolioPage", "#/"),
         ("toolbar-quick-entry", "QuickEntry", "#/quick-entry"),
         ("toolbar-reports", "ReportsPage", "#/reports"),
     ):

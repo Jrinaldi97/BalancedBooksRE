@@ -4,7 +4,11 @@
  */
 const App = {
     routes: {
-        '/':              { page: 'dashboard',       label: 'Dashboard',          render: () => DashboardPage.render() },
+        '/portfolio/activity': { page:'portfolio-activity', label:'Bank activity', render:()=>{PortfolioPage.state.tab='activity'; return PortfolioPage.render();} },
+        '/portfolio/review': { page:'portfolio-review', label:'Needs review', render:()=>{PortfolioPage.state.tab='review'; return PortfolioPage.render();} },
+        '/portfolio/reports': { page:'portfolio-reports', label:'Financial statements', render:()=>{PortfolioPage.state.tab='reports'; return PortfolioPage.render();} },
+        '/portfolio/setup': { page:'portfolio-setup', label:'Entities & properties', render:()=>{PortfolioPage.state.tab='setup'; return PortfolioPage.render();} },
+        '/':              { page: 'dashboard',       label: 'Portfolio overview',          render: () => { PortfolioPage.state.tab='overview'; return PortfolioPage.render(); } },
         '/customers':     { page: 'customers',       label: 'Customer Center',    render: () => CustomersPage.render() },
         // A customer's or a vendor's page (a dialog over its list) has an
         // address of its own (#238, R8 review): a report opened from the
@@ -1397,7 +1401,7 @@ const App = {
         const companyEl = $('#status-company');
         if (companyEl) companyEl.textContent = `Company: ${name}`;
         // the window / tab title and the topbar brand say whose books these are
-        document.title = `${name} — Slowbooks Pro 2026`;
+        document.title = `${name} — BalancedBooksRE`;
         const brand = $('#topbar-company');
         if (brand) brand.textContent = name;
     },

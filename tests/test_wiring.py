@@ -263,6 +263,12 @@ def test_collector_finds_something():
 # - One-shot seeds run once during setup, not from the running SPA
 # - Legacy paths superseded by newer endpoints (kept for backwards compat)
 _INTENTIONAL_BACKEND_ONLY: set[tuple[str, str]] = {
+    # Machine interface exercised by the portfolio MCP integration test.
+    ("GET","/api/portfolio/ownership-as-of"),
+    ('POST','/api/portfolio/proposals'),
+    ('POST','/api/portfolio/proposals/{ident}/commit'),
+    ('POST','/api/portfolio/statements/save'),
+
     ("POST", "/api/stripe/webhook"),  # legacy alias for provider webhook
     # A garnishment order is ended, never deleted; DELETE stays so an API
     # client is told why (405) and where to go (POST .../end).

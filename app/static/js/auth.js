@@ -286,7 +286,7 @@
             'min-width:340px;max-width:400px;width:100%;' +
             'box-shadow:0 20px 60px rgba(0,0,0,0.4);">' +
             '<h2 id="auth-title" style="margin:0 0 6px;font-size:20px;">' +
-            (name ? "Unlock " + escapeText(name) : "Unlock Slowbooks") +
+            (name ? "Unlock " + escapeText(name) : "Unlock BalancedBooksRE") +
             "</h2>" +
             '<p style="margin:0 0 20px;color:#555;font-size:13px;line-height:1.5;">' +
             (multiUser
@@ -373,7 +373,7 @@
             'style="background:#fff;color:#111;padding:28px 28px 24px;border-radius:8px;' +
             'min-width:380px;max-width:440px;width:100%;' +
             'box-shadow:0 20px 60px rgba(0,0,0,0.4);">' +
-            '<h2 style="margin:0 0 6px;font-size:22px;">Set up Slowbooks Pro 2026</h2>' +
+            '<h2 style="margin:0 0 6px;font-size:22px;">Set up BalancedBooksRE</h2>' +
             '<p style="margin:0 0 8px;color:#555;font-size:13px;line-height:1.5;">' +
             "Just enough to get you in. You can configure everything else later." +
             "</p>" +
@@ -532,7 +532,7 @@
     // Single entry point used by api.js (on 401) and the DOMContentLoaded
     // handler. The view follows /api/auth/status: a company nobody has set
     // up yet opens on first-run setup, every other one on sign-in. (It used
-    // to open on "Unlock Slowbooks — enter your password" for a company that
+    // to open on "Unlock BalancedBooksRE — enter your password" for a company that
     // had no password; the way on was a small link, or a wrong password —
     // explore 2.17.3, skytech M18 / macbase1 F1.) The cross-links still flip
     // between the two.

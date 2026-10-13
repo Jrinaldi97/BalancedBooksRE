@@ -98,7 +98,7 @@ def test_the_sidebars_navigation_landmark_has_a_name():
     assert '<nav id="sidebar" aria-label="Main menu">' in html  # NEW-59
     # its icons are decoration, not part of each link's name (NEW-66 / W-7)
     assert '<span class="nav-icon">' not in html
-    assert html.count('<span class="nav-icon" aria-hidden="true">') >= 40
+    assert 'aria-label="Main menu"' in html  # Text-only portfolio navigation
 
 
 def test_the_inline_skip_link_is_hidden_until_focused_then_shown_in_place():

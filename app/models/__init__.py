@@ -180,3 +180,6 @@ __all__ = [
     "ResellerPermit",
 ]
 from app.models.ocr_templates import OcrTemplate  # noqa: F401
+
+# BalancedBooksRE metadata extends the shared journal ledger.
+from app.portfolio import models as portfolio_models  # noqa: F401,E402

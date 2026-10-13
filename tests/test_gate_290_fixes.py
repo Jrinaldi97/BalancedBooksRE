@@ -734,6 +734,7 @@ def test_private_network_flag_relaxes_only_the_transport_guards(monkeypatch, cap
     import app.main as m
 
     _prod_postgres(monkeypatch)
+    monkeypatch.setattr(m, "_create_missing_tables", lambda: None)  # isolate transport policy from schema bootstrap
     monkeypatch.setenv("SLOWBOOKS_PRIVATE_NETWORK", "1")
     monkeypatch.setattr(m, "FORCE_HTTPS", False)
     monkeypatch.setattr(m.Base.metadata, "create_all", lambda **kw: None)

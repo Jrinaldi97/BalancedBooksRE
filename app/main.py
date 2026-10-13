@@ -344,6 +344,10 @@ def _create_missing_tables() -> None:
             Base.metadata.create_all(bind=conn)
         return
     Base.metadata.create_all(bind=engine)
+    if engine.dialect.name == "sqlite":
+        from app.portfolio.guards import install
+        with engine.begin() as connection:
+            install(connection)
 
 
 @asynccontextmanager
@@ -406,7 +410,7 @@ async def lifespan(app: FastAPI):
 # (fast, and the reason ORJSONResponse was deprecated in 0.136). We let it use
 # its default response class rather than pinning the now-deprecated ORJSON one.
 app = FastAPI(
-    title="Slowbooks Pro 2026",
+    title="BalancedBooksRE",
     version=__version__,
     lifespan=lifespan,
     description=(
@@ -972,6 +976,8 @@ app.add_middleware(
 )
 
 # Phase 9.7: Auth routes MUST be included (they're exempt from the session gate)
+from app.portfolio.routes import router as portfolio_router
+app.include_router(portfolio_router)
 app.include_router(auth_routes.router)
 
 # Original API routes

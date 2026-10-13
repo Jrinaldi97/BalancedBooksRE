@@ -1,3 +1,7 @@
+# BalancedBooksRE
+
+A customized Mac real-estate accounting fork. See [BalancedBooksRE usage and accounting controls](BALANCEDBOOKSRE.md). Original upstream documentation follows.
+
 # Slowbooks Pro 2026
 
 **A personal bookkeeping application raised from the ashes of QuickBooks 2003 Pro.**

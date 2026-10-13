@@ -19,7 +19,8 @@ const API = {
             // Percent-encoded: a header value cannot carry every character
             // a password can.
             if (closingPassword) opts.headers['X-Closing-Date-Password'] = encodeURIComponent(closingPassword);
-            if (body) opts.body = JSON.stringify(body);
+            if (typeof FormData !== 'undefined' && body instanceof FormData) { delete opts.headers['Content-Type']; opts.body = body; }
+            else if (body) opts.body = JSON.stringify(body);
             let res;
             try {
                 res = await fetch(`/api${path}`, opts);
