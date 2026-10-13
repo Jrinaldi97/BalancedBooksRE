@@ -192,9 +192,12 @@ def main():
     class CompanyPicker(desktop.PickerApi):
         def list_companies(self):
             result = super().list_companies()
-            result["companies"] = [
-                {"name": "Original portfolio", "file": "portfolio.db"}
-            ] + [
+            original = (
+                [{"name": "Original portfolio", "file": "portfolio.db"}]
+                if (args.data_dir / "portfolio.db").is_file()
+                else []
+            )
+            result["companies"] = original + [
                 company
                 for company in result["companies"]
                 if (args.data_dir / "companies" / company["file"]).is_file()
