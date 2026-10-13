@@ -1,15 +1,41 @@
 """BalancedBooksRE native Mac entry point, isolated from upstream company files."""
 
 import argparse
+import hashlib
+import json
 import os
 from pathlib import Path
+import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
 
 
-def prepare(data_dir):
+def company_paths(data_dir, filename=None):
+    """Keep every company's database and AI credential separate."""
+    if filename is None or filename == "portfolio.db":
+        return data_dir / "portfolio.db", data_dir / "ai-connection.token", 3188
+    if not re.fullmatch(r"[A-Za-z0-9_-]+\.db", filename):
+        raise ValueError("Invalid company filename")
+    path = data_dir / "companies" / filename
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("Company file does not exist")
+    port = 10000 + int(hashlib.sha256(filename.encode()).hexdigest()[:8], 16) % 40000
+    return path, data_dir / "companies" / (filename + ".token"), port
+
+
+def selected_company(data_dir):
+    marker = data_dir / "active-company.json"
+    if not marker.exists():
+        return "portfolio.db"
+    filename = json.loads(marker.read_text())["file"]
+    company_paths(data_dir, filename)
+    return filename
+
+
+def prepare(data_dir, filename=None):
     data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(data_dir, 0o700)
     env = data_dir / "settings.env"
@@ -23,10 +49,11 @@ def prepare(data_dir):
                 + secrets.token_hex(32)
                 + "\n"
             )
+    database, token_path, _ = company_paths(data_dir, filename)
     os.environ.update(
         SLOWBOOKS_DATA_DIR=str(data_dir),
         SLOWBOOKS_ENV_FILE=str(env),
-        DATABASE_URL="sqlite:///" + str(data_dir / "portfolio.db"),
+        DATABASE_URL="sqlite:///" + str(database),
         APP_DEBUG="true",
         FORCE_HTTPS="false",
         APP_HOST="127.0.0.1",
@@ -44,17 +71,16 @@ def prepare(data_dir):
     cfg.set_main_option("script_location", str(root / "migrations"))
     cfg.attributes["database_url"] = os.environ["DATABASE_URL"]
     command.upgrade(cfg, "head")
-    ensure_local_token(data_dir)
+    ensure_local_token(token_path)
     return root
 
 
-def ensure_local_token(data_dir):
+def ensure_local_token(path):
     """Authorize the same macOS user's local Codex adapter without exposing a secret."""
     from app.database import SessionLocal
     from app.models.api_tokens import ApiToken
     from app.services.api_token_service import generate_token, hash_token
 
-    path = data_dir / "ai-connection.token"
     with SessionLocal() as db:
         if path.exists():
             os.chmod(path, 0o600)
@@ -76,7 +102,7 @@ def ensure_local_token(data_dir):
             stream.write(secret)
 
 
-def matching_server(port, data_dir):
+def matching_server(port, token_path):
     """Only reuse a listener that accepts the token for these exact books."""
     import httpx
 
@@ -84,10 +110,7 @@ def matching_server(port, data_dir):
         with httpx.Client(trust_env=False, timeout=2) as client:
             result = client.get(
                 f"http://127.0.0.1:{port}/api/portfolio/context",
-                headers={
-                    "Authorization": "Bearer "
-                    + (data_dir / "ai-connection.token").read_text().strip()
-                },
+                headers={"Authorization": "Bearer " + token_path.read_text().strip()},
             )
             return (
                 result.status_code == 200
@@ -106,12 +129,16 @@ def main():
         type=Path,
         default=Path.home() / "Library/Application Support/BalancedBooksRE",
     )
-    parser.add_argument("--port", type=int, default=3188)
+    parser.add_argument("--port", type=int)
+    parser.add_argument("--company-file")
     parser.add_argument("--no-window", action="store_true")
     parser.add_argument("--mcp", action="store_true")
     args = parser.parse_args()
     args.data_dir = args.data_dir.resolve()
-    prepare(args.data_dir.resolve())
+    filename = args.company_file or selected_company(args.data_dir)
+    _, token_path, default_port = company_paths(args.data_dir, filename)
+    args.port = args.port or default_port
+    prepare(args.data_dir.resolve(), filename)
     os.environ["APP_PORT"] = str(args.port)
     import uvicorn
     from app.main import app
@@ -123,7 +150,7 @@ def main():
         server.run()
         return 0
     thread = None
-    if not matching_server(args.port, args.data_dir):
+    if not matching_server(args.port, token_path):
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
         for _ in range(300):
@@ -138,9 +165,7 @@ def main():
             raise RuntimeError("The local accounting server did not become ready")
     if args.mcp:
         os.environ["BALANCEDBOOKS_URL"] = f"http://127.0.0.1:{args.port}"
-        os.environ["BALANCEDBOOKS_TOKEN_FILE"] = str(
-            args.data_dir / "ai-connection.token"
-        )
+        os.environ["BALANCEDBOOKS_TOKEN_FILE"] = str(token_path)
         from app.portfolio.mcp_server import configuration, mcp
 
         configuration()
@@ -160,7 +185,70 @@ def main():
         None,
     )
     desktop._saved_document_roots = lambda: ((args.data_dir / "Exports").resolve(),)
-    bridge = desktop.PickerApi(args.port)
+    desktop.PICKER_HTML = desktop.PICKER_HTML.replace(
+        "SlowBooks Pro 2026", "BalancedBooksRE"
+    )
+
+    class CompanyPicker(desktop.PickerApi):
+        def list_companies(self):
+            result = super().list_companies()
+            result["companies"] = [
+                {"name": "Original portfolio", "file": "portfolio.db"}
+            ] + [
+                company
+                for company in result["companies"]
+                if (args.data_dir / "companies" / company["file"]).is_file()
+            ]
+            result["last_opened"] = selected_company(args.data_dir)
+            return result
+
+        def open_company(self, filename):
+            try:
+                _, credential, port = company_paths(args.data_dir, filename)
+                if not matching_server(port, credential):
+                    if desktop._server_already_running(port):
+                        return {
+                            "success": False,
+                            "error": "Another service uses this company's port. No books were switched.",
+                        }
+                    command = [sys.executable]
+                    if not getattr(sys, "frozen", False):
+                        command.append(str(Path(__file__).resolve()))
+                    command += [
+                        "--data-dir",
+                        str(args.data_dir),
+                        "--company-file",
+                        filename,
+                        "--port",
+                        str(port),
+                        "--no-window",
+                    ]
+                    log = open(args.data_dir / "company-server.log", "a")
+                    try:
+                        process = subprocess.Popen(
+                            command, stdout=log, stderr=subprocess.STDOUT
+                        )
+                    finally:
+                        log.close()
+                    if not desktop.wait_for_health(
+                        process, port, timeout=30
+                    ) or not matching_server(port, credential):
+                        desktop.stop_server(process)
+                        return {
+                            "success": False,
+                            "error": "The company could not open. See company-server.log.",
+                        }
+                    self.children.append(process)
+                marker = args.data_dir / "active-company.json"
+                pending = marker.with_suffix(".tmp")
+                pending.write_text(json.dumps({"file": filename}))
+                pending.replace(marker)
+                return {"success": True, "url": f"http://127.0.0.1:{port}"}
+            except Exception as exc:
+                return {"success": False, "error": str(exc)}
+
+    bridge = CompanyPicker(args.port)
+    bridge.children = []
     webview.settings["ALLOW_DOWNLOADS"] = True
     bridge._window = webview.create_window(
         "BalancedBooksRE",
@@ -173,6 +261,8 @@ def main():
     try:
         webview.start(private_mode=False, storage_path=str(args.data_dir / "webview"))
     finally:
+        for child in bridge.children:
+            desktop.stop_server(child)
         if thread:
             server.should_exit = True
             thread.join(timeout=15)

@@ -12,6 +12,8 @@ Each bank has one entity owner. Pooled funds additionally identify beneficiaries
 
 Tenant billing and recurring tenant balances remain in the separate property-management system.
 
+Separate company files are available through the company picker on the unlock screen. They live under the application data directory's `companies/` folder; each has a separate local AI credential and listener. The original `portfolio.db` remains available as Original portfolio. The last selected file opens on the next launch. Restart the local Codex connection after switching files so its session selects those books; an already running connection stays attached to its previous file. Multiple related legal entities can still share one portfolio file for coordinated interentity accounting.
+
 ## Local AI connection
 
 The native executable accepts `--mcp` and provides a local stdio MCP server. It starts the loopback accounting service if needed and reuses only a listener that accepts the credential for these books. No OpenAI API key, internet-facing accounting server or tunnel is required. Remote access to Codex itself is separate.
