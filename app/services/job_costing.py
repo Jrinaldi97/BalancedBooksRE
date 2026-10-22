@@ -43,7 +43,7 @@ from app.models.payroll import Employee, PayType
 from app.models.purchase_orders import POStatus, PurchaseOrder, PurchaseOrderLine
 from app.models.time_entries import TimeEntry, TimeEntryStatus
 from app.models.transactions import Transaction, TransactionLine
-from app.services.accounting import create_journal_entry
+from app.services.accounting import create_journal_entry, void_line_memo
 from app.services.jobs_service import job_attribution
 from app.services.safe_errors import DataProblem
 
@@ -324,7 +324,7 @@ def void_job_cost(db: Session, jc: JobCost) -> None:
                 "account_id": ln.account_id,
                 "debit": ln.credit,
                 "credit": ln.debit,
-                "description": f"VOID: {ln.description or ''}",
+                "description": void_line_memo(ln.description),
                 "job_id": ln.job_id,
                 "cost_code_id": ln.cost_code_id,
                 "cost_type": ln.cost_type,

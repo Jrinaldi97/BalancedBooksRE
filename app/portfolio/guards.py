@@ -3,6 +3,9 @@
 
 def install(connection):
     statements = [
+        """CREATE TRIGGER IF NOT EXISTS re_allocation_replace BEFORE INSERT ON re_line_allocations
+        WHEN NEW.id IS NOT NULL AND EXISTS(SELECT 1 FROM re_line_allocations WHERE id=NEW.id)
+        BEGIN SELECT RAISE(ABORT,'Posted portfolio history is immutable'); END""",
         """CREATE TRIGGER IF NOT EXISTS re_seal_journal BEFORE INSERT ON re_journal_scopes BEGIN
         SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM transaction_lines WHERE transaction_id=NEW.transaction_id)
         OR (SELECT SUM(CAST(ROUND(debit*100) AS INTEGER)-CAST(ROUND(credit*100) AS INTEGER)) FROM transaction_lines WHERE transaction_id=NEW.transaction_id) <> 0
@@ -33,6 +36,7 @@ def install(connection):
         ("re_group_adjustments", "1"),
         ("re_reporting_policies", "1"),
         ("re_cash_classifications", "1"),
+        ("re_line_allocations", "1"),
         ("re_schedule_postings", "1"),
         ("re_schedules", "1"),
         ("re_reconciliations", "1"),

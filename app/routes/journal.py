@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import or_
+from sqlalchemy.exc import StatementError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -17,6 +18,7 @@ from app.schemas.journal import JournalEntryCreate, JournalEntryResponse
 from app.services.accounting import create_journal_entry, reversing_lines
 from app.services.bank_posting import assert_not_reconciled, release_statement_links
 from app.services.closing_date import check_closing_date
+from app.services.safe_errors import safe_message
 
 router = APIRouter(prefix="/api/journal", tags=["journal"])
 
@@ -225,29 +227,43 @@ def void_journal_entry(entry_id: int, db: Session = Depends(get_db)):
 
     reverse_lines = reversing_lines(txn.lines)
     if reverse_lines:
-        void_txn = create_journal_entry(
-            db,
-            txn.date,
-            f"VOID: {txn.description or ''}",
-            reverse_lines,
-            # A QuickBooks Online import posting is reversed under its own
-            # name, so a later import knows it was voided here.
-            source_type=f"{txn.source_type}_void" if from_qbo else "manual_void",
-            source_id=txn.id,
-            reference=txn.reference,
-            class_id=txn.class_id,
-            job_id=txn.job_id,
-        )
-        release_statement_links(db, txn)
-        if from_qbo:
-            qbo_documents.mark_changed_here(
+        try:
+            void_txn = create_journal_entry(
                 db,
-                *db.query(QBOMapping).filter(
-                    QBOMapping.entity_type.in_(("ledger", "journal_entry")),
-                    QBOMapping.slowbooks_id == txn.id,
-                ),
+                txn.date,
+                f"VOID: {txn.description or ''}",
+                reverse_lines,
+                # A QuickBooks Online import posting is reversed under its own
+                # name, so a later import knows it was voided here.
+                source_type=f"{txn.source_type}_void" if from_qbo else "manual_void",
+                source_id=txn.id,
+                reference=txn.reference,
+                class_id=txn.class_id,
+                job_id=txn.job_id,
             )
-        db.commit()
+            release_statement_links(db, txn)
+            if from_qbo:
+                qbo_documents.mark_changed_here(
+                    db,
+                    *db.query(QBOMapping).filter(
+                        QBOMapping.entity_type.in_(("ledger", "journal_entry")),
+                        QBOMapping.slowbooks_id == txn.id,
+                    ),
+                )
+            db.commit()
+        except (ValueError, StatementError) as e:
+            # A reversal that cannot be posted is a problem with the data
+            # (out of balance, a closed period, a value the database
+            # refuses), never a server fault: roll back so the entry is
+            # left exactly as it was and answer 4xx with a sentence
+            # instead of a bare 500.
+            db.rollback()
+            status = 400 if isinstance(e, ValueError) else 422
+            raise HTTPException(
+                status_code=status,
+                detail="This journal entry could not be voided: "
+                + safe_message(e, "void journal entry"),
+            ) from e
         db.refresh(void_txn)
         return get_journal_entry(void_txn.id, db)
 

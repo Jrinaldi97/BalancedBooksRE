@@ -92,6 +92,13 @@ async def records(
     kind: str,
     entity_id: int | None = None,
     account_id: int | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    status: str | None = None,
+    property_id: int | None = None,
+    code: str | None = None,
+    observation_id: int | None = None,
+    event_id: int | None = None,
     offset: int = 0,
     limit: int = 100,
 ) -> dict:
@@ -212,6 +219,34 @@ async def ownership_as_of(
         "GET",
         "/ownership-as-of",
         params={k: v for k, v in locals().items() if v is not None},
+    )
+
+
+@mcp.tool(annotations=READ)
+async def observation_state(observation_id: int, as_of: str | None = None) -> dict:
+    """Inspect explicit correction lineage and dimensional suspense on both bases."""
+    return await request(
+        "GET",
+        f"/observations/{observation_id}/state",
+        params={"as_of": as_of} if as_of else None,
+    )
+
+
+@mcp.tool(annotations=READ)
+async def request_result(key: str) -> dict:
+    """Recover an exact committed command/batch result after a lost response."""
+    from urllib.parse import quote
+
+    return await request("GET", "/requests/" + quote(key, safe=""))
+
+
+@mcp.tool(annotations=READ)
+async def shortage_assessment(review_id: int, as_of: str | None = None) -> dict:
+    """Assess historical shortage evidence without resolving or modifying flags."""
+    return await request(
+        "GET",
+        f"/reviews/{review_id}/shortage-assessment",
+        params={"as_of": as_of} if as_of else None,
     )
 
 

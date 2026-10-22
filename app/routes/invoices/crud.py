@@ -38,6 +38,7 @@ from app.services.jobs_service import (
     refuse_other_customers_jobs_on_edit,
 )
 from app.services.terminology import document_reference, terms_from_db
+from app.services.audit import audited_bulk_delete
 
 
 @router.get("", response_model=list[InvoiceResponse])
@@ -454,7 +455,10 @@ def update_invoice(invoice_id: int, data: InvoiceUpdate, db: Session = Depends(g
         )
 
         if data.lines is not None:
-            db.query(InvoiceLine).filter(InvoiceLine.invoice_id == invoice_id).delete()
+            # each old line leaves a DELETE event with its amounts (#289)
+            audited_bulk_delete(
+                db, db.query(InvoiceLine).filter(InvoiceLine.invoice_id == invoice_id)
+            )
             db.flush()
             for i, line_data in enumerate(data.lines):
                 db.add(

@@ -24,6 +24,7 @@ from app.services.accounting import (
     get_ap_account_id,
     reversing_lines,
 )
+from app.services.audit import audited_bulk_delete
 from app.services.closing_date import check_closing_date
 from app.services.request_utils import content_disposition
 from app.services.purchase_posting import (
@@ -586,7 +587,8 @@ def update_bill(bill_id: int, data: BillUpdate, db: Session = Depends(get_db)):
                         Decimal(str(ln.rate)),
                     )
 
-        db.query(BillLine).filter(BillLine.bill_id == bill.id).delete()
+        # each old line leaves a DELETE event with its amounts (#289)
+        audited_bulk_delete(db, db.query(BillLine).filter(BillLine.bill_id == bill.id))
         db.flush()
         if txn:
             _reverse_and_delete_journal(db, txn.id)

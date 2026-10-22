@@ -17,7 +17,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.accounts import Account
-from app.models.transactions import TransactionLine
 from app.portfolio import models as m, schemas as s, service as svc, reports
 from app.portfolio.imports import parse_bank
 
@@ -69,7 +68,29 @@ def admin_operation(request, operation):
 
 @router.get("/context")
 def context(db: Session = Depends(get_db)):
+    from pathlib import Path
+    from sqlalchemy import inspect, text
+    from app.models.settings import Settings
+    from app import __version__
+
+    reports.read_snapshot(db)
+    company = db.query(Settings).filter_by(key="company_name").first()
+    database = db.connection().engine.url.database
+    versions = (
+        list(db.execute(text("SELECT version_num FROM alembic_version")).scalars())
+        if inspect(db.connection()).has_table("alembic_version")
+        else []
+    )
     return {
+        "connection": {
+            "company_name": company.value if company else None,
+            "company_file": Path(database).name if database else None,
+            "database_engine": db.get_bind().dialect.name,
+            "upstream_base_version": __version__,
+            "portfolio_release": "2026.10-maintenance.1",
+            "schema_revisions": versions,
+            "command_schema_digest": svc.digest(commands()),
+        },
         "product": "BalancedBooksRE",
         "interface_version": "1",
         "money": "integer USD cents",
@@ -138,7 +159,18 @@ def propose(payload: s.Command, request: Request, db: Session = Depends(get_db))
                 "events": [reports.event_detail(db, i) for i in ids],
             }
             trial.rollback()
-        preview["result"]["committed"] = False
+
+        def mark_preview(value):
+            if isinstance(value, dict):
+                if "committed" in value:
+                    value["committed"] = False
+                for child in value.values():
+                    mark_preview(child)
+            elif isinstance(value, list):
+                for child in value:
+                    mark_preview(child)
+
+        mark_preview(preview["result"])
         data = payload.model_dump(mode="json")
         hashed = svc.digest(
             {"request": data, "revisions": revisions, "preview": preview}
@@ -293,16 +325,28 @@ def records(
     end: date | None = None,
     status: str | None = None,
     property_id: int | None = None,
+    code: str | None = None,
+    observation_id: int | None = None,
+    event_id: int | None = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
+    if start and end and start > end:
+        raise HTTPException(422, detail="Start date must not follow end date")
     if kind == "accounts":
+        if any(
+            x is not None
+            for x in (start, end, status, property_id, code, observation_id, event_id)
+        ):
+            raise HTTPException(422, detail="Unsupported account collection filter")
         q = db.query(m.AccountScope, Account).join(
             Account, Account.id == m.AccountScope.account_id
         )
         if entity_id:
             q = q.filter(m.AccountScope.entity_id == entity_id)
+        if account_id:
+            q = q.filter(m.AccountScope.account_id == account_id)
         return {
             "total": q.count(),
             "rows": [
@@ -334,35 +378,56 @@ def records(
                 422, detail="This collection does not support entity filtering"
             )
     if account_id:
-        if not hasattr(model, "account_id"):
+        if hasattr(model, "account_id"):
+            q = q.filter(model.account_id == account_id)
+        elif model is m.ReviewItem:
+            q = q.filter(
+                model.observation_id.in_(
+                    db.query(m.BankObservation.id).filter_by(account_id=account_id)
+                )
+            )
+        else:
             raise HTTPException(
                 422, detail="This collection does not support bank filtering"
             )
-        q = q.filter(model.account_id == account_id)
-    if start and hasattr(model, "date"):
-        q = q.filter(model.date >= start)
-    if end and hasattr(model, "date"):
-        q = q.filter(model.date <= end)
-    if status and hasattr(model, "status"):
-        q = q.filter(model.status == status)
+    if start or end:
+        if hasattr(model, "date"):
+            if start:
+                q = q.filter(model.date >= start)
+            if end:
+                q = q.filter(model.date <= end)
+        elif model is m.ReviewItem:
+            dated = db.query(m.Event.id)
+            if start:
+                dated = dated.filter(m.Event.date >= start)
+            if end:
+                dated = dated.filter(m.Event.date <= end)
+            q = q.filter(model.event_id.in_(dated))
+        else:
+            raise HTTPException(
+                422, detail="This collection does not support date filtering"
+            )
+    for name, value in (
+        ("status", status),
+        ("code", code),
+        ("observation_id", observation_id),
+        ("event_id", event_id),
+    ):
+        if value is not None:
+            column = getattr(model, name, None)
+            if column is None:
+                raise HTTPException(
+                    422, detail=f"This collection does not support {name} filtering"
+                )
+            q = q.filter(column == value)
     if property_id:
         if hasattr(model, "property_id"):
             q = q.filter(model.property_id == property_id)
-        elif hasattr(model, "event_id"):
-            events = (
-                db.query(m.JournalScope.event_id)
-                .join(
-                    m.LineScope,
-                    m.LineScope.line_id.in_(
-                        db.query(TransactionLine.id).filter(
-                            TransactionLine.transaction_id
-                            == m.JournalScope.transaction_id
-                        )
-                    ),
-                )
-                .filter(m.LineScope.property_id == property_id)
-            )
-            q = q.filter(model.event_id.in_(events))
+        elif hasattr(model, "event_id") or model is m.Event:
+            from app.portfolio.allocations import property_event_ids
+
+            events = property_event_ids(db, property_id, end)
+            q = q.filter((model.id if model is m.Event else model.event_id).in_(events))
         else:
             raise HTTPException(
                 422, detail="This collection does not support property filtering"
@@ -436,5 +501,37 @@ def statement_pdf(
                 "Content-Disposition": 'attachment; filename="BalancedBooksRE-statements.pdf"'
             },
         )
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/observations/{ident}/state")
+def observation_state(
+    ident: int, as_of: date | None = None, db: Session = Depends(get_db)
+):
+    from app.portfolio.observation_state import observation_state as read_state
+
+    try:
+        return read_state(db, ident, as_of)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/requests/{key}")
+def request_result(key: str, db: Session = Depends(get_db)):
+    record = db.get(m.RequestRecord, key)
+    if record is None:
+        return {"key": key, "committed": False, "status": "not_found"}
+    return {"key": key, "status": "committed", "result": record.result}
+
+
+@router.get("/reviews/{ident}/shortage-assessment")
+def shortage_assessment(
+    ident: int, as_of: date | None = None, db: Session = Depends(get_db)
+):
+    from app.portfolio.assessments import shortage_assessment as assess
+
+    try:
+        return assess(db, ident, as_of)
     except svc.Problem as exc:
         raise error(exc) from exc

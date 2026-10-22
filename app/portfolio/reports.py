@@ -19,7 +19,13 @@ def read_snapshot(db):
 
 
 def ledger(
-    db, end, entity_ids=None, property_id=None, account_id=None, basis="accrual"
+    db,
+    end,
+    entity_ids=None,
+    property_id=None,
+    account_id=None,
+    basis="accrual",
+    event_ids=None,
 ):
     query = (
         db.query(
@@ -37,17 +43,17 @@ def ledger(
         .join(Account, Account.id == TransactionLine.account_id)
         .filter(Transaction.date <= end)
     )
+    if event_ids is not None:
+        query = query.filter(m.JournalScope.event_id.in_(event_ids))
     if entity_ids:
         query = query.filter(m.JournalScope.entity_id.in_(entity_ids))
-    if property_id:
-        query = query.filter(m.LineScope.property_id == property_id)
     if account_id:
         query = query.filter(Account.id == account_id)
     overrides = {
         x.line_id: x
         for x in db.query(m.CashClassification)
         .filter(m.CashClassification.date <= end)
-        .order_by(m.CashClassification.id)
+        .order_by(m.CashClassification.date, m.CashClassification.id)
     }
     rows = []
     for ln, txn, js, dim, sc, acct in query.order_by(
@@ -71,6 +77,7 @@ def ledger(
                 ),
                 "debit_cents": cents(ln.debit),
                 "credit_cents": cents(ln.credit),
+                "unit_id": dim.unit_id,
                 "property_id": dim.property_id,
                 "fund_id": dim.fund_id,
                 "counterparty_id": dim.counterparty_id,
@@ -79,8 +86,50 @@ def ledger(
                 "virtual": False,
             }
         )
+    from app.portfolio.allocations import effective_map
+
+    replacements = effective_map(db, end, [row["line_id"] for row in rows])
+    effective_rows = []
+    for row in rows:
+        replacement = replacements.get(row["line_id"])
+        if replacement:
+            for component in replacement.components:
+                amount = component["amount_cents"]
+                classification = overrides.get(row["line_id"])
+                later_classification = classification and (
+                    classification.date,
+                    classification.event_id,
+                ) > (replacement.date, replacement.event_id)
+                effective_rows.append(
+                    {
+                        **row,
+                        **{k: v for k, v in component.items() if k != "amount_cents"},
+                        "debit_cents": max(amount, 0),
+                        "credit_cents": max(-amount, 0),
+                        "allocation_event_id": replacement.event_id,
+                        "cash_flow": (
+                            classification.cash_flow
+                            if later_classification
+                            else component.get("cash_flow")
+                        ),
+                        "classification_event_id": (
+                            classification.event_id
+                            if later_classification
+                            else replacement.event_id
+                        ),
+                    }
+                )
+        else:
+            effective_rows.append(row)
+    rows = [
+        row
+        for row in effective_rows
+        if property_id is None or row.get("property_id") == property_id
+    ]
     if basis == "modified_cash_bank_posting":
         query = db.query(m.BasisAdjustment).filter(m.BasisAdjustment.date <= end)
+        if event_ids is not None:
+            query = query.filter(m.BasisAdjustment.event_id.in_(event_ids))
         if entity_ids:
             query = query.filter(m.BasisAdjustment.entity_id.in_(entity_ids))
         for adjustment in query:
@@ -599,6 +648,25 @@ def event_detail(db, ident):
         "event": values(event),
         "lines": lines,
         "documents": links,
+        "management_allocations": [
+            values(x)
+            for x in db.query(m.ManagementAllocation).filter_by(event_id=ident)
+        ],
+        "cash_classifications": [
+            values(x) for x in db.query(m.CashClassification).filter_by(event_id=ident)
+        ],
+        "line_allocations": [
+            values(x) for x in db.query(m.LineAllocation).filter_by(event_id=ident)
+        ],
+        "item_applications": [
+            values(x) for x in db.query(m.ItemApplication).filter_by(event_id=ident)
+        ],
+        "reviews_created": [
+            values(x) for x in db.query(m.ReviewItem).filter_by(event_id=ident)
+        ],
+        "reviews_resolved": [
+            values(x) for x in db.query(m.ReviewItem).filter_by(resolved_event_id=ident)
+        ],
         "basis_adjustments": [
             values(x) for x in db.query(m.BasisAdjustment).filter_by(event_id=ident)
         ],

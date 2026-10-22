@@ -18,6 +18,7 @@ from app.services.accounting import (
     create_journal_entry,
     get_ar_account_id,
     _q,
+    void_line_memo,
 )
 from app.services.jobs_service import own_job
 from app.services.numbering import next_invoice_number
@@ -84,7 +85,7 @@ def void_invoice(invoice_id: int, db: Session = Depends(get_db)):
                     "account_id": ol.account_id,
                     "debit": ol.credit,  # swap debit/credit
                     "credit": ol.debit,
-                    "description": f"VOID: {ol.description or ''}",
+                    "description": void_line_memo(ol.description),
                 }
             )
         if reverse_lines:

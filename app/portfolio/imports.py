@@ -11,6 +11,8 @@ from app.portfolio.service import fail
 def parse_bank(content, filename, mapping, date_format="%Y-%m-%d", sheet=None):
     if len(content) > 25 * 1024 * 1024:
         fail("file_size", "Bank import limit is 25 MB per file")
+    source_sheet = None
+    physical_rows = []
     if filename.lower().endswith(".xlsx"):
         from openpyxl import load_workbook
 
@@ -22,6 +24,8 @@ def parse_bank(content, filename, mapping, date_format="%Y-%m-%d", sheet=None):
             if not headers:
                 fail("empty_file", "Spreadsheet has no header row")
             rows = [dict(zip([str(h or "") for h in headers], row)) for row in iterator]
+            physical_rows = list(range(2, len(rows) + 2))
+            source_sheet = ws.title
         finally:
             book.close()
     elif filename.lower().endswith(".csv"):
@@ -29,7 +33,18 @@ def parse_bank(content, filename, mapping, date_format="%Y-%m-%d", sheet=None):
             text = content.decode("utf-8-sig")
         except UnicodeDecodeError:
             text = content.decode("cp1252")
-        rows = list(csv.DictReader(io.StringIO(text)))
+        reader = csv.reader(io.StringIO(text))
+        headers = next(reader, [])
+        rows = []
+        while True:
+            physical_start = reader.line_num + 1
+            row = next(reader, None)
+            if row is None:
+                break
+            if not row:
+                continue
+            rows.append(dict(zip(headers, row)))
+            physical_rows.append(physical_start)
     else:
         fail(
             "file_type",
@@ -51,7 +66,7 @@ def parse_bank(content, filename, mapping, date_format="%Y-%m-%d", sheet=None):
         return int(number * 100)
 
     result = []
-    for number, row in enumerate(rows, 2):
+    for number, row in zip(physical_rows, rows, strict=True):
         if all(v is None or str(v).strip() == "" for v in row.values()):
             continue
 
@@ -87,6 +102,8 @@ def parse_bank(content, filename, mapping, date_format="%Y-%m-%d", sheet=None):
         )
         result.append(
             {
+                "physical_row": number,
+                "source_sheet": source_sheet,
                 "date": day.isoformat(),
                 "amount_cents": amount,
                 "description": str(cell("description") or ""),

@@ -264,6 +264,9 @@ def test_collector_finds_something():
 # - Legacy paths superseded by newer endpoints (kept for backwards compat)
 _INTENTIONAL_BACKEND_ONLY: set[tuple[str, str]] = {
     # Machine interface exercised by the portfolio MCP integration test.
+    ("GET", "/api/portfolio/observations/{ident}/state"),
+    ("GET", "/api/portfolio/requests/{key}"),
+    ("GET", "/api/portfolio/reviews/{ident}/shortage-assessment"),
     ("GET","/api/portfolio/ownership-as-of"),
     ('POST','/api/portfolio/proposals'),
     ('POST','/api/portfolio/proposals/{ident}/commit'),

@@ -348,3 +348,18 @@ class ReportingPolicy(Base):
     reviewed_by = Column(String(200), nullable=False)
     evidence = Column(Text, nullable=False)
     supersedes_id = Column(Integer, ForeignKey("re_reporting_policies.id"))
+
+
+class LineAllocation(Base):
+    """Append-only replacement scope components; original journal stays intact."""
+
+    __tablename__ = "re_line_allocations"
+    id = Column(Integer, primary_key=True)
+    line_id = Column(
+        Integer, ForeignKey("transaction_lines.id"), nullable=False, index=True
+    )
+    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False, index=True)
+    date = Column(Date, nullable=False, index=True)
+    components = Column(JSON, nullable=False)
+    evidence = Column(Text, nullable=False)
+    supersedes_id = Column(Integer, ForeignKey("re_line_allocations.id"))

@@ -401,11 +401,14 @@ def _post_invoice_journal(
 
 
 def _reverse_and_delete_journal(db: Session, transaction_id: int):
-    """Reverse account balances for existing journal lines, then delete them.
+    """Reverse account balances for existing journal lines, then delete them,
+    each leaving a DELETE audit event with its account and amounts (#289).
 
-    Used by update_invoice to prepare for a fresh journal rebuild.
+    Used by update_invoice and update_bill to prepare for a fresh journal
+    rebuild.
     """
     from app.models.transactions import TransactionLine
+    from app.services.audit import audited_bulk_delete
 
     old_lines = (
         db.query(TransactionLine)
@@ -419,6 +422,9 @@ def _reverse_and_delete_journal(db: Session, transaction_id: int):
                 account.balance -= ol.debit - ol.credit
             else:
                 account.balance -= ol.credit - ol.debit
-    db.query(TransactionLine).filter(
-        TransactionLine.transaction_id == transaction_id
-    ).delete()
+    audited_bulk_delete(
+        db,
+        db.query(TransactionLine).filter(
+            TransactionLine.transaction_id == transaction_id
+        ),
+    )

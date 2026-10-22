@@ -149,6 +149,8 @@ class Posting(Input):
 
 
 class BankRow(Input):
+    physical_row: Id | None = None
+    source_sheet: str | None = None
     date: date
     amount_cents: SignedCents
     description: str = ""
@@ -316,6 +318,14 @@ class PoolActivityInput(Input):
     evidence: str = Field(min_length=1)
 
 
+class PostedPoolInput(PoolActivityInput):
+    review_id: Id
+    expected_state_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+CONTRACTS["correct_posted_pool"] = PostedPoolInput
+
+
 CONTRACTS["pool_activity"] = PoolActivityInput
 
 
@@ -465,3 +475,102 @@ CONTRACTS.update(
     group_adjustment=GroupAdjustmentInput,
     record_policy=PolicyInput,
 )
+
+
+class BatchOperation(Input):
+    operation: str
+    data: dict
+
+
+class BatchInput(Input):
+    operations: list[BatchOperation] = Field(min_length=1, max_length=200)
+
+
+CONTRACTS["batch"] = BatchInput
+
+
+class PoolCorrectionComponent(PoolActivityInput):
+    amount_cents: SignedCents
+
+
+class SplitPoolCorrectionInput(Input):
+    observation_id: Id
+    review_id: Id
+    expected_state_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    evidence: str = Field(min_length=1)
+    components: list[PoolCorrectionComponent] = Field(min_length=1, max_length=100)
+
+
+CONTRACTS["correct_posted_pool_split"] = SplitPoolCorrectionInput
+
+
+class PostedSettlementInput(SettleInput):
+    review_id: Id
+    expected_state_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+CONTRACTS["correct_posted_settlement"] = PostedSettlementInput
+
+
+class PostedTransferLeg(Input):
+    observation_id: Id
+    review_id: Id
+    expected_state_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class PostedInternalTransferInput(Input):
+    withdrawal: PostedTransferLeg
+    deposit: PostedTransferLeg
+    fund_id: Id
+    property_id: Id | None = None
+    evidence: str = Field(min_length=1)
+    release_reason: str | None = None
+
+
+CONTRACTS["correct_posted_internal_transfer"] = PostedInternalTransferInput
+
+
+class PostedIntercompanyInput(Input):
+    withdrawal: PostedTransferLeg
+    deposit: PostedTransferLeg
+    purpose: Literal["advance", "repayment"]
+    item: str = Field(min_length=1, max_length=100)
+    date: date
+    evidence: str = Field(min_length=1)
+
+
+CONTRACTS["correct_posted_intercompany"] = PostedIntercompanyInput
+
+
+class PostedPartyBalanceInput(Input):
+    observation: PostedTransferLeg
+    party_id: Id
+    code: str = Field(min_length=1, max_length=64)
+    kind: Literal["party_receivable", "party_payable"]
+    date: date
+    property_id: Id | None = None
+    evidence: str = Field(min_length=1)
+
+
+CONTRACTS["correct_posted_party_balance"] = PostedPartyBalanceInput
+
+
+class ExpectedCorrectionBalance(Input):
+    account_id: Id
+    amount_cents: SignedCents
+    property_id: Id | None = None
+    unit_id: Id | None = None
+    fund_id: Id | None = None
+    counterparty_id: Id | None = None
+    item: str | None = None
+    party_id: Id | None = None
+
+
+class ValidateExistingCorrectionInput(Input):
+    observation: PostedTransferLeg
+    corrective_event_id: Id
+    balances: list[ExpectedCorrectionBalance] = Field(min_length=1, max_length=100)
+    evidence: str = Field(min_length=1)
+
+
+CONTRACTS["validate_existing_correction"] = ValidateExistingCorrectionInput

@@ -959,3 +959,1037 @@ def test_loan_and_owner_cash_classification_defaults(portfolio):
             offset_account_id=control(db, e, "payable"),
             rationale="must link to recognized item",
         )
+
+
+def test_zero_net_bank_correction_does_not_repeat_shortage(portfolio):
+    db, e, bank, expense, _ = portfolio
+    journal(
+        db, e, "2026-01-02", [ln(bank, -110000), ln(expense, 110000)], observed=True
+    )
+    before = db.query(m.ReviewItem).filter_by(code="actual_shortage").count()
+    assert before == 1
+    journal(db, e, "2026-01-02", [ln(bank, 100), ln(bank, -100)])
+    assert db.query(m.ReviewItem).filter_by(code="actual_shortage").count() == before
+    journal(db, e, "2026-01-03", [ln(bank, -100), ln(expense, 100)], observed=True)
+    assert (
+        db.query(m.ReviewItem).filter_by(code="actual_shortage").count() == before + 1
+    )
+    assert balance(db, bank) == -10100
+
+
+def test_effective_allocations_agree_between_reports_and_controls(portfolio):
+    from app.portfolio.reports import ledger
+    from app.models.transactions import TransactionLine
+    from sqlalchemy.exc import IntegrityError
+
+    db, e, bank, _, _ = portfolio
+    prop = run(db, "create_property", code="ALLOCATION", name="Allocation property")[
+        "property_id"
+    ]
+    bank_line = db.query(TransactionLine).filter_by(account_id=bank).one()
+    original = db.get(m.LineScope, bank_line.id)
+    event_id = (
+        db.query(m.JournalScope)
+        .filter_by(transaction_id=bank_line.transaction_id)
+        .one()
+        .event_id
+    )
+    allocation = m.LineAllocation(
+        line_id=bank_line.id,
+        event_id=event_id,
+        date=date(2026, 1, 3),
+        evidence="Synthetic allocation proof",
+        components=[
+            {
+                "amount_cents": 60000,
+                "property_id": prop,
+                "unit_id": None,
+                "fund_id": None,
+                "counterparty_id": None,
+                "item": None,
+                "cash_flow": None,
+            },
+            {
+                "amount_cents": 40000,
+                "property_id": None,
+                "unit_id": None,
+                "fund_id": None,
+                "counterparty_id": None,
+                "item": None,
+                "cash_flow": None,
+            },
+        ],
+    )
+    db.add(allocation)
+    db.flush()
+    assert balance(db, bank, date(2026, 1, 2), property_id=prop) == 0
+    assert balance(db, bank, date(2026, 1, 3), property_id=prop) == 60000
+    assert balance(db, bank) == 100000
+    rows = ledger(db, date(2026, 1, 3), property_id=prop, account_id=bank)
+    assert sum(r["debit_cents"] - r["credit_cents"] for r in rows) == 60000
+    assert ledger(db, date(2026, 1, 2), property_id=prop, account_id=bank) == []
+    assert original.property_id is None
+    db.add(
+        m.CashClassification(
+            line_id=bank_line.id,
+            event_id=event_id,
+            date=date(2026, 1, 4),
+            cash_flow="financing",
+            reason="Later evidence",
+        )
+    )
+    db.flush()
+    assert all(
+        r["cash_flow"] is None for r in ledger(db, date(2026, 1, 3), account_id=bank)
+    )
+    assert all(
+        r["cash_flow"] == "financing"
+        for r in ledger(db, date(2026, 1, 4), account_id=bank)
+    )
+    from app.portfolio.guards import install
+
+    install(db.connection())
+    with pytest.raises(IntegrityError), db.begin_nested():
+        db.execute(
+            text("UPDATE re_line_allocations SET evidence='rewrite' WHERE id=:id"),
+            {"id": allocation.id},
+        )
+    with pytest.raises(IntegrityError), db.begin_nested():
+        db.execute(
+            text(
+                "INSERT OR REPLACE INTO re_line_allocations SELECT * FROM re_line_allocations WHERE id=:id"
+            ),
+            {"id": allocation.id},
+        )
+    assert (
+        db.get(m.LineAllocation, allocation.id).evidence == "Synthetic allocation proof"
+    )
+
+
+def test_observation_state_preserves_dimensional_residuals(portfolio):
+    from app.portfolio.observation_state import observation_state
+
+    db, e, bank, expense, _ = portfolio
+    obs = bank_rows(db, bank, [{"date": "2026-02-01", "amount_cents": -10000}])[0]
+    original = run(db, "post_bank", observation_id=obs, rationale="Statement source")
+    prop = run(db, "create_property", code="SCOPE", name="Scope property")[
+        "property_id"
+    ]
+    suspense = control(db, e, "suspense_debit")
+    overlay = journal(
+        db,
+        e,
+        "2026-02-02",
+        [ln(suspense, -10000), ln(suspense, 10000, property_id=prop)],
+        corrects_id=original["event_id"],
+    )
+    # A correction that only clears the original company scope must not be
+    # reported as fully resolved merely because the account total is zero.
+    journal(
+        db,
+        e,
+        "2026-02-03",
+        [ln(suspense, -10000), ln(expense, 10000)],
+        corrects_id=overlay["event_id"],
+    )
+    before = db.query(m.Event).count()
+    state = observation_state(db, obs, date(2026, 2, 3))
+    residuals = state["suspense_residuals"]["accrual"]
+    assert len(residuals) == 2
+    assert sum(r["amount_cents"] for r in residuals) == 0
+    assert {r["property_id"] for r in residuals} == {None, prop}
+    assert state["bank_movements"] == [
+        {"account_id": bank, "date": "2026-02-01", "amount_cents": -10000}
+    ]
+    assert len(observation_state(db, obs, date(2026, 2, 1))["event_ids"]) == 1
+    assert (
+        observation_state(db, obs, date(2026, 2, 3))["state_digest"]
+        == state["state_digest"]
+    )
+    assert db.query(m.Event).count() == before
+
+
+def test_purpose_correction_clears_effective_property_scope(portfolio):
+    from app.portfolio.observation_state import observation_state
+
+    db, e, bank, expense, _ = portfolio
+    obs = bank_rows(db, bank, [{"date": "2026-02-01", "amount_cents": -10000}])[0]
+    original = run(db, "post_bank", observation_id=obs, rationale="Statement source")
+    prop = run(db, "create_property", code="CORRECT", name="Correct property")[
+        "property_id"
+    ]
+    suspense = control(db, e, "suspense_debit")
+    journal(
+        db,
+        e,
+        "2026-02-01",
+        [ln(suspense, -10000), ln(suspense, 10000, property_id=prop)],
+        corrects_id=original["event_id"],
+    )
+    review = db.query(m.ReviewItem).filter_by(observation_id=obs, code="suspense").one()
+    run(
+        db,
+        "correct_suspense",
+        review_id=review.id,
+        account_id=expense,
+        property_id=prop,
+        date="2026-02-01",
+        evidence="Verified property and purpose",
+    )
+    state = observation_state(db, obs)
+    assert state["suspense_residuals"] == {
+        "accrual": [],
+        "modified_cash_bank_posting": [],
+    }
+    assert balance(db, bank) == 90000
+    assert balance(db, expense, property_id=prop) == 10000
+    assert review.status == "resolved"
+
+
+def test_posted_pool_receipt_changes_custody_without_repeating_cash(db_session):
+    from app.portfolio.observation_state import observation_state
+    from app.models.transactions import TransactionLine
+
+    db = db_session
+    holder = entity(db, "HOLDER")
+    bank = account(db, holder, "pool", "asset", "bank", pooled=True)
+    unknown = run(db, "create_party", code="UNKNOWN", name="Unknown beneficiary")[
+        "party_id"
+    ]
+    client = run(db, "create_party", code="CLIENT", name="External client")["party_id"]
+    unresolved = run(
+        db,
+        "create_fund",
+        code="UNRESOLVED",
+        holder_entity_id=holder,
+        beneficiary_id=unknown,
+        purpose="unresolved",
+    )["fund_id"]
+    fund = run(
+        db,
+        "create_fund",
+        code="CLIENT",
+        holder_entity_id=holder,
+        beneficiary_id=client,
+        purpose="general",
+    )["fund_id"]
+    obs = bank_rows(db, bank, [{"date": "2026-02-01", "amount_cents": 33000}])[0]
+    original = run(
+        db,
+        "post_bank",
+        observation_id=obs,
+        fund_id=unresolved,
+        rationale="Unknown receipt",
+    )
+    review = db.query(m.ReviewItem).filter_by(observation_id=obs, code="suspense").one()
+    physical = [
+        (r.id, r.debit, r.credit)
+        for r in db.query(TransactionLine).filter_by(account_id=bank)
+    ]
+    data = dict(
+        observation_id=obs,
+        review_id=review.id,
+        fund_id=fund,
+        expected_state_digest=observation_state(db, obs)["state_digest"],
+        evidence="Owner funding verified",
+    )
+    key = uuid.uuid4().hex
+    result = execute(db, {"operation": "correct_posted_pool", "key": key, "data": data})
+    assert result["bank_cash_delta_cents"] == 0
+    assert execute(db, {"operation": "correct_posted_pool", "key": key, "data": data})[
+        "replayed"
+    ]
+    assert [
+        (r.id, r.debit, r.credit)
+        for r in db.query(TransactionLine).filter_by(account_id=bank)
+    ] == physical
+    assert db.get(m.BankObservation, obs).event_id == original["event_id"]
+    assert balance(db, bank, fund_id=unresolved) == 0
+    assert balance(db, bank, fund_id=fund) == 33000
+    assert balance(db, control(db, holder, "custody_liability"), fund_id=fund) == -33000
+    assert review.status == "resolved"
+    assert observation_state(db, obs)["suspense_residuals"]["accrual"] == []
+    for basis in ("accrual", "modified_cash_bank_posting"):
+        assert all(
+            v == 0
+            for v in statements(
+                db, date(2026, 1, 1), date(2026, 12, 31), [holder], basis=basis
+            )["checks"].values()
+        )
+
+
+def test_atomic_batch_rolls_back_and_replays(portfolio):
+    db, e, bank, expense, _ = portfolio
+    original_events = db.query(m.Event).count()
+    operation = {
+        "operation": "post",
+        "data": {
+            "date": "2026-02-01",
+            "description": "Batch test",
+            "rationale": "Synthetic evidence",
+            "journals": [{"entity_id": e, "lines": [ln(bank, -100), ln(expense, 100)]}],
+        },
+    }
+    key = uuid.uuid4().hex
+    with pytest.raises(Problem):
+        execute(
+            db,
+            {
+                "key": key,
+                "operation": "batch",
+                "data": {
+                    "operations": [operation, {"operation": "not_real", "data": {}}]
+                },
+            },
+        )
+    assert balance(db, bank) == 100000
+    assert db.query(m.Event).count() == original_events
+    assert db.get(m.RequestRecord, key) is None
+    command = {
+        "key": key,
+        "operation": "batch",
+        "data": {"operations": [operation, operation]},
+    }
+    result = execute(db, command)
+    assert result["atomic"] and result["operation_count"] == 2
+    assert len(set(result["event_ids"])) == 2
+    assert balance(db, bank) == 99800
+    assert execute(db, command)["replayed"]
+    assert balance(db, bank) == 99800
+    with pytest.raises(Problem, match="different contents"):
+        execute(db, {**command, "data": {"operations": [operation]}})
+    for forbidden in ("batch", "close_period", "reopen_period"):
+        with pytest.raises(Problem, match="separately"):
+            run(db, "batch", operations=[{"operation": forbidden, "data": {}}])
+
+
+def test_posted_pool_split_keeps_client_and_security_funds_distinct(db_session):
+    from app.portfolio.observation_state import observation_state
+    from app.models.transactions import TransactionLine
+
+    db = db_session
+    holder = entity(db, "MIXED")
+    bank = account(db, holder, "pool", "asset", "bank", pooled=True)
+    party = run(db, "create_party", code="CLIENT", name="Client")["party_id"]
+    funds = [
+        run(
+            db,
+            "create_fund",
+            code=purpose,
+            holder_entity_id=holder,
+            beneficiary_id=party,
+            purpose=purpose,
+            restriction=restriction,
+        )["fund_id"]
+        for purpose, restriction in [
+            ("unresolved", "unrestricted"),
+            ("general", "unrestricted"),
+            ("security_deposit", "tenant"),
+        ]
+    ]
+    obs = bank_rows(db, bank, [{"date": "2026-02-01", "amount_cents": 100000}])[0]
+    run(db, "post_bank", observation_id=obs, fund_id=funds[0], rationale="Statement")
+    review = db.query(m.ReviewItem).filter_by(observation_id=obs, code="suspense").one()
+    data = dict(
+        observation_id=obs,
+        review_id=review.id,
+        expected_state_digest=observation_state(db, obs)["state_digest"],
+        evidence="Issued owner statement establishes key fee and tenant deposit",
+        components=[
+            dict(
+                observation_id=obs,
+                amount_cents=amount,
+                fund_id=fund,
+                evidence="Component proof",
+            )
+            for amount, fund in [(15000, funds[1]), (85000, funds[2])]
+        ],
+    )
+    before = db.query(TransactionLine).filter_by(account_id=bank).count()
+    bad = {**data, "components": data["components"] + [data["components"][0]]}
+    with pytest.raises(Problem, match="remaining bank suspense"):
+        run(db, "correct_posted_pool_split", **bad)
+    assert review.status == "open"
+    run(db, "correct_posted_pool_split", **data)
+    assert db.query(TransactionLine).filter_by(account_id=bank).count() == before
+    assert balance(db, bank, fund_id=funds[0]) == 0
+    assert balance(db, bank, fund_id=funds[1]) == 15000
+    assert balance(db, bank, fund_id=funds[2]) == 85000
+    assert review.status == "resolved"
+    custody = control(db, holder, "custody_liability")
+    assert balance(db, custody, fund_id=funds[1]) == -15000
+    assert balance(db, custody, fund_id=funds[2]) == -85000
+
+
+def test_posted_pool_partial_resumes_without_repeating_cash(db_session):
+    from app.portfolio.observation_state import observation_state
+    from app.models.transactions import TransactionLine
+
+    db = db_session
+    holder = entity(db, "PARTIAL")
+    bank = account(db, holder, "pool", "asset", "bank", pooled=True)
+    party = run(db, "create_party", code="CLIENT", name="Client")["party_id"]
+    funds = [
+        run(
+            db,
+            "create_fund",
+            code=code,
+            holder_entity_id=holder,
+            beneficiary_id=party,
+            purpose=purpose,
+        )["fund_id"]
+        for code, purpose in [
+            ("UNKNOWN", "unresolved"),
+            ("A", "general"),
+            ("B", "general"),
+        ]
+    ]
+    obs = bank_rows(db, bank, [{"date": "2026-02-01", "amount_cents": 100000}])[0]
+    run(db, "post_bank", observation_id=obs, fund_id=funds[0], rationale="Statement")
+    review = db.query(m.ReviewItem).filter_by(observation_id=obs, code="suspense").one()
+    original = [
+        (r.id, r.debit, r.credit)
+        for r in db.query(TransactionLine).filter_by(account_id=bank)
+    ]
+    first_digest = observation_state(db, obs)["state_digest"]
+    for amount, fund, remaining in [(15000, funds[1], 85000), (85000, funds[2], 0)]:
+        data = dict(
+            observation_id=obs,
+            review_id=review.id,
+            expected_state_digest=observation_state(db, obs)["state_digest"],
+            evidence="Documented component",
+            components=[
+                dict(
+                    observation_id=obs,
+                    amount_cents=amount,
+                    fund_id=fund,
+                    evidence="Component proof",
+                )
+            ],
+        )
+        if remaining == 0:
+            with pytest.raises(Problem, match="changed"):
+                run(
+                    db,
+                    "correct_posted_pool_split",
+                    **{**data, "expected_state_digest": first_digest},
+                )
+        result = run(db, "correct_posted_pool_split", **data)
+        assert result["remaining_cents"] == remaining
+        assert review.status == ("open" if remaining else "resolved")
+        assert balance(db, bank, fund_id=funds[0]) == remaining
+    assert balance(db, bank, fund_id=funds[1]) == 15000
+    assert balance(db, bank, fund_id=funds[2]) == 85000
+    assert [
+        (r.id, r.debit, r.credit)
+        for r in db.query(TransactionLine).filter_by(account_id=bank)
+    ] == original
+    assert observation_state(db, obs)["suspense_residuals"]["accrual"] == []
+
+
+def test_review_filters_are_explicit_and_count_before_pagination(portfolio):
+    from app.portfolio.routes import records
+    from fastapi import HTTPException
+
+    db, e, bank, _, _ = portfolio
+    ids = bank_rows(
+        db,
+        bank,
+        [
+            {"date": "2026-02-01", "amount_cents": 100},
+            {"date": "2026-03-01", "amount_cents": 200},
+        ],
+    )
+    for obs in ids:
+        run(db, "post_bank", observation_id=obs, rationale="Statement")
+    result = records(
+        "reviews",
+        account_id=bank,
+        code="suspense",
+        status="open",
+        start=date(2026, 2, 1),
+        end=date(2026, 2, 28),
+        offset=0,
+        limit=1,
+        db=db,
+    )
+    assert result["total"] == 1
+    assert result["rows"][0]["observation_id"] == ids[0]
+    assert records("reviews", code="suspense", offset=1, limit=1, db=db)["total"] == 2
+    assert (
+        records(
+            "reviews", observation_id=ids[1], code="suspense", offset=0, limit=1, db=db
+        )["total"]
+        == 1
+    )
+    with pytest.raises(HTTPException, match="date filtering"):
+        records("entities", start=date(2026, 1, 1), offset=0, limit=1, db=db)
+    with pytest.raises(HTTPException, match="Unsupported"):
+        records("accounts", status="open", offset=0, limit=1, db=db)
+
+
+def test_posted_settlement_clears_suspense_without_repeating_bank_or_item(portfolio):
+    from app.portfolio.observation_state import observation_state
+    from app.models.transactions import TransactionLine
+
+    db, e, bank, expense, _ = portfolio
+    item = run(
+        db,
+        "recognize",
+        code="POSTED-BILL",
+        entity_id=e,
+        date="2026-01-01",
+        kind="expense",
+        account_id=expense,
+        control_id=control(db, e, "payable"),
+        amount_cents=10000,
+        description="Recognized bill",
+        evidence="Invoice",
+    )["item_id"]
+    obs = bank_rows(db, bank, [{"date": "2026-02-01", "amount_cents": -4000}])[0]
+    original = run(db, "post_bank", observation_id=obs, rationale="Statement")
+    review = db.query(m.ReviewItem).filter_by(observation_id=obs, code="suspense").one()
+    physical = [
+        (r.id, r.debit, r.credit)
+        for r in db.query(TransactionLine).filter_by(account_id=bank)
+    ]
+    command = dict(
+        operation="correct_posted_settlement",
+        key=uuid.uuid4().hex,
+        data=dict(
+            item_id=item,
+            observation_id=obs,
+            review_id=review.id,
+            expected_state_digest=observation_state(db, obs)["state_digest"],
+            evidence="Invoice matched to payment",
+        ),
+    )
+    execute(db, command)
+    assert execute(db, command)["replayed"]
+    assert db.get(m.BankObservation, obs).event_id == original["event_id"]
+    assert [
+        (r.id, r.debit, r.credit)
+        for r in db.query(TransactionLine).filter_by(account_id=bank)
+    ] == physical
+    assert (
+        db.query(m.ItemApplication).filter_by(item_id=item).one().amount_cents == 4000
+    )
+    assert review.status == "resolved"
+    assert observation_state(db, obs)["suspense_residuals"]["accrual"] == []
+    for basis in ("accrual", "modified_cash_bank_posting"):
+        report = statements(db, date(2026, 2, 1), date(2026, 2, 28), [e], basis=basis)
+        assert all(v == 0 for v in report["checks"].values())
+        assert report["income_statement"]["net_income_cents"] == (
+            -4000 if basis == "modified_cash_bank_posting" else 0
+        )
+
+
+def test_context_identifies_company_and_command_contract(db_session):
+    from app.models.settings import Settings
+    from app.portfolio.routes import context, commands
+    from app.portfolio.service import digest
+
+    db_session.add(Settings(key="company_name", value="Synthetic test company"))
+    db_session.flush()
+    identity = context(db_session)["connection"]
+    assert identity["company_name"] == "Synthetic test company"
+    assert identity["command_schema_digest"] == digest(commands())
+    assert identity["portfolio_release"] == "2026.10-maintenance.1"
+    assert identity["database_engine"] == "sqlite"
+
+
+@pytest.mark.parametrize("funding", [100000, 20000])
+def test_posted_internal_pool_transfer_preserves_both_source_legs(db_session, funding):
+    from app.portfolio.observation_state import observation_state
+    from app.models.transactions import TransactionLine
+
+    db = db_session
+    holder = entity(db, "TRANSFER")
+    banks = [
+        account(
+            db, holder, code, "asset", "bank", pooled=True, coverage_start="2026-01-01"
+        )
+        for code in ("A", "B")
+    ]
+    party = run(db, "create_party", code="CLIENT", name="Client")["party_id"]
+    funds = [
+        run(
+            db,
+            "create_fund",
+            code=purpose,
+            holder_entity_id=holder,
+            beneficiary_id=party,
+            purpose=purpose,
+        )["fund_id"]
+        for purpose in ("unresolved", "general")
+    ]
+    seed = bank_rows(
+        db, banks[0], [{"date": "2026-01-01", "amount_cents": funding}], "seed.csv"
+    )[0]
+    run(
+        db,
+        "pool_activity",
+        observation_id=seed,
+        fund_id=funds[1],
+        evidence="Client funds",
+    )
+    specs = []
+    original_events = []
+    for bank, amount in zip(banks, (-30000, 30000)):
+        obs = bank_rows(
+            db, bank, [{"date": "2026-02-01", "amount_cents": amount}], f"{bank}.csv"
+        )[0]
+        result = run(
+            db, "post_bank", observation_id=obs, fund_id=funds[0], rationale="Statement"
+        )
+        original_events.append(result["event_id"])
+        review = (
+            db.query(m.ReviewItem).filter_by(observation_id=obs, code="suspense").one()
+        )
+        specs.append(
+            dict(
+                observation_id=obs,
+                review_id=review.id,
+                expected_state_digest=observation_state(db, obs)["state_digest"],
+            )
+        )
+    before = [
+        (r.id, r.debit, r.credit)
+        for r in db.query(TransactionLine).filter(TransactionLine.account_id.in_(banks))
+    ]
+    command = dict(
+        operation="correct_posted_internal_transfer",
+        key=uuid.uuid4().hex,
+        data=dict(
+            withdrawal=specs[0],
+            deposit=specs[1],
+            fund_id=funds[1],
+            evidence="Both statements and transfer confirmation",
+        ),
+    )
+    if funding < 30000:
+        event_count = db.query(m.Event).count()
+        allocation_count = db.query(m.LineAllocation).count()
+        with pytest.raises(Problem, match="insufficient supported holdings"):
+            execute(db, command)
+        assert db.query(m.Event).count() == event_count
+        assert db.query(m.LineAllocation).count() == allocation_count
+        assert all(
+            db.get(m.ReviewItem, spec["review_id"]).status == "open" for spec in specs
+        )
+        assert db.query(m.RequestRecord).filter_by(key=command["key"]).count() == 0
+        return
+    execute(db, command)
+    assert execute(db, command)["replayed"]
+    assert [
+        (r.id, r.debit, r.credit)
+        for r in db.query(TransactionLine).filter(TransactionLine.account_id.in_(banks))
+    ] == before
+    assert [
+        db.get(m.BankObservation, spec["observation_id"]).event_id for spec in specs
+    ] == original_events
+    assert [balance(db, bank, fund_id=funds[1]) for bank in banks] == [70000, 30000]
+    for spec in specs:
+        assert db.get(m.ReviewItem, spec["review_id"]).status == "resolved"
+        assert (
+            observation_state(db, spec["observation_id"])["suspense_residuals"][
+                "accrual"
+            ]
+            == []
+        )
+    for basis in ("accrual", "modified_cash_bank_posting"):
+        report = statements(
+            db, date(2026, 2, 1), date(2026, 2, 28), [holder], basis=basis
+        )
+        assert all(v == 0 for v in report["checks"].values())
+
+    from app.portfolio.assessments import shortage_assessment
+
+    alert = db.query(m.ReviewItem).filter_by(code="actual_shortage").first()
+    assessment = shortage_assessment(db, alert.id, date(2026, 2, 1))
+    assert assessment["classification"] == "allocation_artifact_candidate"
+    assert assessment["effective_historical_balance_cents"] == 0
+    assert alert.status == "open"
+
+
+def test_shortage_assessment_retains_historical_shortfall_and_is_read_only(portfolio):
+    from app.portfolio.assessments import shortage_assessment
+
+    db, e, bank, expense, income = portfolio
+    journal(
+        db, e, "2026-02-01", [ln(bank, -110000), ln(expense, 110000)], observed=True
+    )
+    review = db.query(m.ReviewItem).filter_by(code="actual_shortage").one()
+    before = shortage_assessment(db, review.id, date(2026, 2, 1))
+    assert before["classification"] == "unresolved_shortfall"
+    assert before["effective_historical_balance_cents"] == -10000
+    journal(db, e, "2026-03-01", [ln(bank, 20000), ln(income, -20000)], observed=True)
+    counts = (db.query(m.Event).count(), db.query(m.RequestRecord).count())
+    after = shortage_assessment(db, review.id, date(2026, 3, 1))
+    assert after["classification"] == "historical_shortfall_later_nonnegative"
+    assert after["effective_historical_balance_cents"] == -10000
+    assert after["effective_current_balance_cents"] == 10000
+    assert len(after["later_receipts"]) == 1
+    assert shortage_assessment(db, review.id, date(2026, 3, 1)) == after
+    assert review.status == "open"
+    assert (db.query(m.Event).count(), db.query(m.RequestRecord).count()) == counts
+    unknown = account(db, e, "UNKNOWN-COVERAGE", "asset", "bank")
+    journal(db, e, "2026-02-01", [ln(unknown, -100), ln(expense, 100)], observed=True)
+    other = (
+        db.query(m.ReviewItem)
+        .filter_by(code="actual_shortage")
+        .order_by(m.ReviewItem.id.desc())
+        .first()
+    )
+    assert (
+        shortage_assessment(db, other.id, date(2026, 3, 1))["classification"]
+        == "insufficient_source_coverage"
+    )
+
+
+def test_posted_intercompany_advance_keeps_funding_uncertainty_and_cash(db_session):
+    from app.portfolio.observation_state import observation_state
+    from app.models.transactions import TransactionLine
+
+    db = db_session
+    entities = [entity(db, code) for code in ("CPM", "RPC")]
+    banks = [account(db, e, "bank", "asset", "bank", pooled=True) for e in entities]
+    party = run(db, "create_party", code="UNKNOWN", name="Unresolved owner")["party_id"]
+    funds = [
+        run(
+            db,
+            "create_fund",
+            code=f"U{e}",
+            holder_entity_id=e,
+            beneficiary_id=party,
+            purpose="unresolved",
+        )["fund_id"]
+        for e in entities
+    ]
+    specs, original = [], []
+    for bank, fund, amount in zip(banks, funds, (-700000, 700000)):
+        obs = bank_rows(
+            db, bank, [{"date": "2026-02-01", "amount_cents": amount}], f"{bank}.csv"
+        )[0]
+        original.append(
+            run(
+                db, "post_bank", observation_id=obs, fund_id=fund, rationale="Statement"
+            )["event_id"]
+        )
+        review = (
+            db.query(m.ReviewItem).filter_by(observation_id=obs, code="suspense").one()
+        )
+        specs.append(
+            dict(
+                observation_id=obs,
+                review_id=review.id,
+                expected_state_digest=observation_state(db, obs)["state_digest"],
+            )
+        )
+    physical = [
+        (r.id, r.debit, r.credit)
+        for r in db.query(TransactionLine).filter(TransactionLine.account_id.in_(banks))
+    ]
+    command = dict(
+        operation="correct_posted_intercompany",
+        key=uuid.uuid4().hex,
+        data=dict(
+            withdrawal=specs[0],
+            deposit=specs[1],
+            purpose="advance",
+            item="RPC-7000",
+            date="2026-02-01",
+            evidence="User confirmed loan purpose; funding source not established",
+        ),
+    )
+    result = execute(db, command)
+    assert len(result["open_funding_review_ids"]) == 2
+    assert execute(db, command)["replayed"]
+    assert balance(db, control(db, entities[0], "due_from"), item="RPC-7000") == 700000
+    assert balance(db, control(db, entities[1], "due_to"), item="RPC-7000") == -700000
+    assert [
+        (r.id, r.debit, r.credit)
+        for r in db.query(TransactionLine).filter(TransactionLine.account_id.in_(banks))
+    ] == physical
+    assert [
+        db.get(m.BankObservation, spec["observation_id"]).event_id for spec in specs
+    ] == original
+    for spec in specs:
+        assert (
+            observation_state(db, spec["observation_id"])["suspense_residuals"][
+                "accrual"
+            ]
+            == []
+        )
+    assert (
+        db.query(m.ReviewItem).filter_by(code="actual_shortage", status="open").count()
+        > 0
+    )
+    for basis in ("accrual", "modified_cash_bank_posting"):
+        report = statements(
+            db, date(2026, 2, 1), date(2026, 2, 28), entities, basis=basis
+        )
+        assert all(v == 0 for v in report["checks"].values())
+    repayment_specs = []
+    for bank, fund, amount in zip(reversed(banks), reversed(funds), (-200000, 200000)):
+        obs = bank_rows(
+            db,
+            bank,
+            [{"date": "2026-03-01", "amount_cents": amount}],
+            f"repay-{bank}.csv",
+        )[0]
+        run(
+            db,
+            "post_bank",
+            observation_id=obs,
+            fund_id=fund,
+            rationale="Repayment statement",
+        )
+        review = (
+            db.query(m.ReviewItem).filter_by(observation_id=obs, code="suspense").one()
+        )
+        repayment_specs.append(
+            dict(
+                observation_id=obs,
+                review_id=review.id,
+                expected_state_digest=observation_state(db, obs)["state_digest"],
+            )
+        )
+    repayment = dict(
+        withdrawal=repayment_specs[0],
+        deposit=repayment_specs[1],
+        purpose="repayment",
+        item="RPC-7000",
+        date="2026-03-01",
+        evidence="Confirmed partial repayment",
+    )
+    with pytest.raises(Problem, match="exact entity pair"):
+        run(db, "correct_posted_intercompany", **{**repayment, "item": "UNRELATED"})
+    assert all(
+        db.get(m.ReviewItem, spec["review_id"]).status == "open"
+        for spec in repayment_specs
+    )
+    run(db, "correct_posted_intercompany", **repayment)
+    assert balance(db, control(db, entities[0], "due_from"), item="RPC-7000") == 500000
+    assert balance(db, control(db, entities[1], "due_to"), item="RPC-7000") == -500000
+
+
+def test_party_receivable_and_loan_remain_distinct_without_false_income(portfolio):
+    from app.portfolio.observation_state import observation_state
+    from app.models.transactions import TransactionLine
+
+    db, e, bank, _, _ = portfolio
+    party = run(db, "create_party", code="JOSEPH", name="Joseph")["party_id"]
+    items = []
+    for amount, kind, code in [
+        (-7179, "party_receivable", "JOSEPH-ADVANCE"),
+        (50000, "party_payable", "JOSEPH-LOAN"),
+    ]:
+        obs = bank_rows(
+            db, bank, [{"date": "2026-02-01", "amount_cents": amount}], code + ".csv"
+        )[0]
+        original = run(db, "post_bank", observation_id=obs, rationale="Statement")
+        review = (
+            db.query(m.ReviewItem).filter_by(observation_id=obs, code="suspense").one()
+        )
+        before = [
+            (r.id, r.debit, r.credit)
+            for r in db.query(TransactionLine).filter_by(account_id=bank)
+        ]
+        command = dict(
+            operation="correct_posted_party_balance",
+            key=uuid.uuid4().hex,
+            data=dict(
+                observation=dict(
+                    observation_id=obs,
+                    review_id=review.id,
+                    expected_state_digest=observation_state(db, obs)["state_digest"],
+                ),
+                party_id=party,
+                code=code,
+                kind=kind,
+                date="2026-02-01",
+                evidence="User confirms separate debt balances",
+            ),
+        )
+        result = execute(db, command)
+        assert execute(db, command)["replayed"]
+        items.append(result["item_id"])
+        assert db.get(m.Event, result["event_id"]).source["party_id"] == party
+        assert db.get(m.BankObservation, obs).event_id == original["event_id"]
+        assert [
+            (r.id, r.debit, r.credit)
+            for r in db.query(TransactionLine).filter_by(account_id=bank)
+        ] == before
+        for line in (
+            db.query(m.LineScope)
+            .join(TransactionLine, m.LineScope.line_id == TransactionLine.id)
+            .join(
+                m.JournalScope,
+                m.JournalScope.transaction_id == TransactionLine.transaction_id,
+            )
+            .filter(m.JournalScope.event_id == result["event_id"])
+        ):
+            assert line.counterparty_id is None
+    assert balance(db, control(db, e, "receivable"), item="JOSEPH-ADVANCE") == 7179
+    assert balance(db, control(db, e, "payable"), item="JOSEPH-LOAN") == -50000
+    receipt = bank_rows(
+        db, bank, [{"date": "2026-03-01", "amount_cents": 7179}], "repayment.csv"
+    )[0]
+    run(
+        db,
+        "settle",
+        observation_id=receipt,
+        item_id=items[0],
+        evidence="Repayment of Joseph advance",
+    )
+    assert balance(db, control(db, e, "receivable"), item="JOSEPH-ADVANCE") == 0
+    assert balance(db, control(db, e, "payable"), item="JOSEPH-LOAN") == -50000
+    for basis in ("accrual", "modified_cash_bank_posting"):
+        report = statements(db, date(2026, 2, 1), date(2026, 3, 31), [e], basis=basis)
+        assert report["income_statement"]["net_income_cents"] == 0
+        assert all(v == 0 for v in report["checks"].values())
+
+
+def test_validate_existing_correction_requires_lineage_and_complete_scopes(portfolio):
+    from app.portfolio.observation_state import observation_state
+
+    db, e, bank, expense, _ = portfolio
+    obs = bank_rows(db, bank, [{"date": "2026-02-01", "amount_cents": -15000}])[0]
+    original = run(db, "post_bank", observation_id=obs, rationale="Statement")
+    review = db.query(m.ReviewItem).filter_by(observation_id=obs, code="suspense").one()
+    correction = journal(
+        db,
+        e,
+        "2026-02-01",
+        [ln(control(db, e, "suspense_debit"), -15000), ln(expense, 15000)],
+        corrects_id=original["event_id"],
+    )
+    unrelated = journal(
+        db, e, "2026-02-01", [ln(expense, 1), ln(control(db, e, "equity"), -1)]
+    )
+    data = dict(
+        observation=dict(
+            observation_id=obs,
+            review_id=review.id,
+            expected_state_digest=observation_state(db, obs)["state_digest"],
+        ),
+        corrective_event_id=correction["event_id"],
+        balances=[dict(account_id=expense, amount_cents=15000)],
+        evidence="Verified complete existing purpose correction",
+    )
+    with pytest.raises(Problem, match="explicitly linked"):
+        run(
+            db,
+            "validate_existing_correction",
+            **{**data, "corrective_event_id": unrelated["event_id"]},
+        )
+    with pytest.raises(Problem, match="stated scope"):
+        run(
+            db,
+            "validate_existing_correction",
+            **{**data, "balances": [dict(account_id=expense, amount_cents=14000)]},
+        )
+    before = db.query(m.Event).count()
+    command = dict(
+        operation="validate_existing_correction", key=uuid.uuid4().hex, data=data
+    )
+    result = execute(db, command)
+    assert result["new_financial_events"] == 0
+    assert execute(db, command)["replayed"]
+    assert db.query(m.Event).count() == before
+    assert review.status == "resolved"
+    assert db.get(m.BankObservation, obs).event_id == original["event_id"]
+
+
+def test_property_record_filters_use_effective_bank_allocations(portfolio):
+    from app.portfolio.routes import records
+    from app.models.transactions import TransactionLine
+
+    db, e, bank, _, _ = portfolio
+    prop = run(db, "create_property", code="FILTER", name="Effective property")[
+        "property_id"
+    ]
+    line = db.query(TransactionLine).filter_by(account_id=bank).one()
+    event_id = (
+        db.query(m.JournalScope)
+        .filter_by(transaction_id=line.transaction_id)
+        .one()
+        .event_id
+    )
+    db.add(
+        m.LineAllocation(
+            line_id=line.id,
+            event_id=event_id,
+            date=date(2026, 1, 3),
+            evidence="Supported property split",
+            components=[
+                dict(
+                    amount_cents=100000,
+                    property_id=prop,
+                    unit_id=None,
+                    fund_id=None,
+                    counterparty_id=None,
+                    item=None,
+                    cash_flow=None,
+                )
+            ],
+        )
+    )
+    db.flush()
+    assert (
+        records(
+            "events", property_id=prop, end=date(2026, 1, 2), offset=0, limit=20, db=db
+        )["total"]
+        == 0
+    )
+    assert (
+        records(
+            "events", property_id=prop, end=date(2026, 1, 3), offset=0, limit=20, db=db
+        )["rows"][0]["id"]
+        == event_id
+    )
+
+
+def test_import_preserves_physical_rows_separate_from_normalized_indexes(portfolio):
+    db, _, bank, _, _ = portfolio
+    content = b'd,a,m\n2026-02-01,1,"first\ncontinued"\n,,\n\n2026-02-02,2,second\n'
+    parsed = parse_bank(
+        content, "original.csv", {"date": "d", "amount": "a", "description": "m"}
+    )
+    assert [row["physical_row"] for row in parsed["rows"]] == [2, 6]
+    result = run(db, "import_bank", account_id=bank, **parsed)
+    sources = [
+        db.get(m.BankObservation, ident).source for ident in result["observation_ids"]
+    ]
+    assert [s["physical_row"] for s in sources] == [2, 6]
+    assert [s["normalized_record_index"] for s in sources] == [1, 2]
+    assert all(s["sha256"] == hashlib.sha256(content).hexdigest() for s in sources)
+
+
+def test_allocation_migration_refuses_to_discard_recorded_history(
+    portfolio, monkeypatch
+):
+    import importlib
+    from app.models.transactions import TransactionLine
+
+    db, _, bank, _, _ = portfolio
+    migration = importlib.import_module(
+        "migrations.versions.bb0002_effective_allocations"
+    )
+    line = db.query(TransactionLine).filter_by(account_id=bank).one()
+    event = db.query(m.JournalScope).filter_by(transaction_id=line.transaction_id).one()
+    db.add(
+        m.LineAllocation(
+            line_id=line.id,
+            event_id=event.event_id,
+            date=date(2026, 1, 1),
+            components=[dict(amount_cents=100000)],
+            evidence="Preserved history",
+        )
+    )
+    db.flush()
+    monkeypatch.setattr(migration.op, "get_bind", lambda: db.connection())
+    with pytest.raises(RuntimeError, match="cannot be discarded"):
+        migration.downgrade()
+    assert db.query(m.LineAllocation).count() == 1

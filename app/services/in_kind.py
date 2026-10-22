@@ -19,6 +19,7 @@ from app.models.transactions import Transaction
 from app.services.accounting import (
     _q,
     create_journal_entry,
+    fit_line_memo,
     get_in_kind_income_account_id,
     reversing_lines,
 )
@@ -79,7 +80,7 @@ def post_in_kind_gift(db: Session, gift: InKindGift) -> Transaction | None:
                 "account_id": ln.debit_account_id,
                 "debit": amt,
                 "credit": Decimal("0"),
-                "description": ln.description,
+                "description": fit_line_memo(ln.description),
                 **dims,
             }
         )
@@ -88,7 +89,7 @@ def post_in_kind_gift(db: Session, gift: InKindGift) -> Transaction | None:
                 "account_id": ln.credit_account_id,
                 "debit": Decimal("0"),
                 "credit": amt,
-                "description": f"In-kind: {ln.description}",
+                "description": fit_line_memo(f"In-kind: {ln.description}"),
                 **dims,
             }
         )

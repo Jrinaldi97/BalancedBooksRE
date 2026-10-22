@@ -30,6 +30,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
+from sqlalchemy.exc import DataError
 
 from app.services.control_accounts import MissingControlAccount
 from app.services.rate_limit import limiter
@@ -530,6 +531,31 @@ async def _missing_control_account_handler(request: Request, exc: Exception):
 
 
 app.add_exception_handler(MissingControlAccount, _missing_control_account_handler)
+
+
+# ---- A value the database refuses (422, not 500) ----
+# PostgreSQL enforces column widths and types that SQLite does not: a
+# 301-character split memo, a number out of range. That is a problem with
+# the data, not a server fault, and nothing was written (the request's
+# session rolls back). Answer 422 with a fixed sentence; the driver's text
+# carries the statement and its parameters, so it goes to the log only.
+async def _data_error_handler(request: Request, exc: Exception):
+    logging.getLogger(__name__).warning(
+        "database refused a value: %s %s",
+        request.method,
+        request.url.path,
+        exc_info=exc,
+    )
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": "A value in this request is too long or not valid for "
+            "the database, so nothing was saved."
+        },
+    )
+
+
+app.add_exception_handler(DataError, _data_error_handler)
 
 
 # ---- Validation errors (422), in sentences ----

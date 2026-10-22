@@ -21,6 +21,7 @@ from app.services.accounting import (
     get_ar_account_id,
     get_undeposited_funds_id,
     reversing_lines,
+    void_line_memo,
 )
 from app.services.closing_date import check_closing_date
 
@@ -450,7 +451,7 @@ def void_payment(payment_id: int, db: Session = Depends(get_db)):
                 "account_id": ol.account_id,
                 "debit": ol.credit,
                 "credit": ol.debit,
-                "description": f"VOID: {ol.description or ''}",
+                "description": void_line_memo(ol.description),
             }
             for ol in original_lines
         ]

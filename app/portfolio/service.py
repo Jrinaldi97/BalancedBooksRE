@@ -93,15 +93,28 @@ def balance(db, account_id, through=None, fund_id=None, item=None, property_id=N
     ).filter(TransactionLine.account_id == account_id)
     if through:
         query = query.filter(Transaction.date <= through)
-    if fund_id is not None or item is not None or property_id is not None:
-        query = query.join(m.LineScope, m.LineScope.line_id == TransactionLine.id)
-        if fund_id is not None:
-            query = query.filter(m.LineScope.fund_id == fund_id)
-        if item is not None:
-            query = query.filter(m.LineScope.item == item)
-        if property_id is not None:
-            query = query.filter(m.LineScope.property_id == property_id)
-    return sum(cents(r.debit) - cents(r.credit) for r in query.all())
+    from app.portfolio.allocations import effective_map, components
+
+    records = query.all()
+    # Account totals remain original physical amounts. Only dimensional reads
+    # need the append-only effective allocation history.
+    if fund_id is None and item is None and property_id is None:
+        return sum(cents(r.debit) - cents(r.credit) for r in records)
+    replacements = effective_map(db, through, [r.id for r in records])
+    total = 0
+    for row in records:
+        dim = get(db, m.LineScope, row.id)
+        for component in components(
+            row.id, cents(row.debit) - cents(row.credit), dim, replacements
+        ):
+            if fund_id is not None and component.get("fund_id") != fund_id:
+                continue
+            if item is not None and component.get("item") != item:
+                continue
+            if property_id is not None and component.get("property_id") != property_id:
+                continue
+            total += component["amount_cents"]
+    return total
 
 
 TEMPLATES = [
@@ -366,12 +379,12 @@ def validate_lines(db, entity_id, lines, balanced=True):
             fail("missing_fund", "Custody controls require a fund")
 
 
-def post(db, data, actor):
+def post(db, data, actor, allocation_journals=()):
     reciprocal = defaultdict(int)
     cash_changes = defaultdict(int)
     custodial = defaultdict(int)
     fund_movement = defaultdict(int)
-    for journal in data.journals:
+    for journal in [*data.journals, *allocation_journals]:
         check_date(db, journal.entity_id, data.date)
         validate_lines(db, journal.entity_id, journal.lines)
         for ln in journal.lines:
@@ -414,6 +427,9 @@ def post(db, data, actor):
             "custody_mismatch",
             "Maintained beneficiary and holder must have equal custody changes",
         )
+    account_changes = defaultdict(int)
+    for (account_id, _), amount in cash_changes.items():
+        account_changes[account_id] += amount
     for (account_id, fund_id), amount in cash_changes.items():
         sc = scope(db, account_id)
         if fund_id and amount < 0:
@@ -437,8 +453,8 @@ def post(db, data, actor):
                 )
         if (
             sc.role == "bank"
-            and amount < 0
-            and balance(db, account_id, data.date) + amount < 0
+            and account_changes[account_id] < 0
+            and balance(db, account_id, data.date) + account_changes[account_id] < 0
             and not data.observed
         ):
             fail("insufficient_cash", "Planned payment exceeds supported bank cash")
@@ -541,8 +557,11 @@ def post(db, data, actor):
     finally:
         db.info.pop("portfolio_posting", None)
     for (account_id, fund_id), amount in cash_changes.items():
+        # A zero-net scope correction is not a new cash shortfall. Existing
+        # alerts remain in history; any new cash-changing event is assessed.
         if (
-            balance(db, account_id, data.date, fund_id) < 0
+            amount != 0
+            and balance(db, account_id, data.date, fund_id) < 0
             and scope(db, account_id).role == "bank"
         ):
             db.add(
@@ -615,6 +634,10 @@ def import_bank(db, data, actor):
                 "file": data.source_name,
                 "sha256": data.source_sha256,
                 "row": number,
+                "normalized_record_index": number - 1,
+                "physical_row": row.physical_row,
+                "sheet": row.source_sheet,
+                "provider_transaction_id": row.external_id,
                 "occurrence": occurrences[fingerprint],
             },
             status="possible_duplicate" if cross_file else "imported",
@@ -1082,9 +1105,25 @@ def recognize(db, data, actor):
 
 def settle(db, data, actor, returned=False):
     item = get(db, m.OpenItem, data.item_id)
-    obs = unposted(db, data.observation_id)
+    correcting = isinstance(data, s.PostedSettlementInput)
+    if correcting:
+        from app.portfolio.observation_state import observation_state
+
+        obs = get(db, m.BankObservation, data.observation_id)
+        review = get(db, m.ReviewItem, data.review_id)
+        if (
+            review.observation_id != obs.id
+            or review.code != "suspense"
+            or review.status != "open"
+        ):
+            fail("review_state", "Choose this observation's open suspense review")
+        state = observation_state(db, obs.id)
+        if state["state_digest"] != data.expected_state_digest:
+            fail("stale_state", "Observation state changed; inspect it again")
+    else:
+        obs = unposted(db, data.observation_id)
     scope(db, obs.account_id, item.entity_id)
-    expected = 1 if item.kind == "income" else -1
+    expected = 1 if item.kind in ("income", "party_receivable") else -1
     if returned:
         expected = -expected
     if obs.amount_cents * expected <= 0:
@@ -1118,14 +1157,22 @@ def settle(db, data, actor, returned=False):
         obs.amount_cents,
         property_id=item.property_id,
         fund_id=data.fund_id,
-        cash_flow=scope(db, item.account_id).cash_flow,
+        cash_flow=(
+            "investing"
+            if item.kind == "party_receivable"
+            else (
+                "financing"
+                if item.kind == "party_payable"
+                else scope(db, item.account_id).cash_flow
+            )
+        ),
     )
     ctrl = line(
         item.control_id, -obs.amount_cents, property_id=item.property_id, item=item.code
     )
     adj = []
     management = []
-    if item.kind != "asset":
+    if item.kind not in ("asset", "party_receivable", "party_payable"):
         adj = [
             s.Adjustment(
                 entity_id=item.entity_id,
@@ -1156,20 +1203,21 @@ def settle(db, data, actor, returned=False):
                 amount_cents=obs.amount_cents,
             )
         ]
-    result = post(
-        db,
-        s.Posting(
-            date=obs.date,
-            description=("Return settlement " if returned else "Settle ") + item.code,
-            rationale=data.evidence,
-            kind="settlement_return" if returned else "settlement",
-            source={"observation_id": obs.id, "item_id": item.id},
-            journals=[s.Journal(entity_id=item.entity_id, lines=[bank, ctrl])],
-            adjustments=adj,
-            management=management,
-            observed=True,
-        ),
-        actor,
+    posting = s.Posting(
+        date=obs.date,
+        description=("Return settlement " if returned else "Settle ") + item.code,
+        rationale=data.evidence,
+        kind="settlement_return" if returned else "settlement",
+        source={"observation_id": obs.id, "item_id": item.id},
+        journals=[s.Journal(entity_id=item.entity_id, lines=[bank, ctrl])],
+        adjustments=adj,
+        management=management,
+        observed=True,
+    )
+    result = (
+        post_existing_pool(db, posting, obs, review, state, actor)
+        if correcting
+        else post(db, posting, actor)
     )
     db.add(
         m.ItemApplication(
@@ -1178,8 +1226,9 @@ def settle(db, data, actor, returned=False):
             amount_cents=-amount if returned else amount,
         )
     )
-    obs.event_id = result["event_id"]
-    obs.status = "posted"
+    if not correcting:
+        obs.event_id = result["event_id"]
+        obs.status = "posted"
     return result
 
 
@@ -1221,11 +1270,31 @@ def correct_suspense(db, data, actor):
         .filter(m.JournalScope.event_id == obs.event_id)
         .all()
     )
-    suspense_dim = next(dim for ln, dim in original if ln.account_id == suspense)
+    from app.portfolio.observation_state import observation_state
+    from app.portfolio.allocations import DIMENSIONS
+
+    state = observation_state(db, obs.id, data.date)
+    residuals = state["suspense_residuals"]["accrual"]
+    if residuals != state["suspense_residuals"]["modified_cash_bank_posting"]:
+        fail(
+            "basis_state",
+            "Existing correction timing needs a coordinated basis correction",
+        )
+    if any(
+        r["entity_id"] != sc.entity_id or r["account_id"] != suspense for r in residuals
+    ):
+        fail(
+            "correction_scope", "The correction chain contains another suspense control"
+        )
+    if sum(r["amount_cents"] for r in residuals) != -obs.amount_cents:
+        fail(
+            "correction_residual",
+            "The remaining suspense differs from this observation; use a partial or existing-correction workflow",
+        )
     entries = [
-        line(suspense, obs.amount_cents, property_id=suspense_dim.property_id),
-        line(data.account_id, -obs.amount_cents, property_id=data.property_id),
-    ]
+        line(suspense, -r["amount_cents"], **{key: r.get(key) for key in DIMENSIONS})
+        for r in residuals
+    ] + [line(data.account_id, -obs.amount_cents, property_id=data.property_id)]
     management = []
     adjustments = []
     if get(db, Account, data.account_id).account_type.value in (
@@ -1259,7 +1328,7 @@ def correct_suspense(db, data, actor):
                         line(
                             x.account_id,
                             x.credit_cents - x.debit_cents,
-                            property_id=x.property_id,
+                            **x.model_dump(include=set(DIMENSIONS)),
                         )
                         for x in entries
                     ],
@@ -1279,6 +1348,18 @@ def correct_suspense(db, data, actor):
             source={"observation_id": obs.id},
         ),
         actor,
+    )
+    # Include explicit property-allocation overlays in effective cash-flow
+    # classification, while retaining all original physical lines.
+    original = (
+        db.query(TransactionLine, m.LineScope)
+        .join(
+            m.JournalScope,
+            m.JournalScope.transaction_id == TransactionLine.transaction_id,
+        )
+        .join(m.LineScope, m.LineScope.line_id == TransactionLine.id)
+        .filter(m.JournalScope.event_id.in_(state["event_ids"]))
+        .all()
     )
     for ln, dim in original:
         if ln.account_id == obs.account_id:
@@ -1563,8 +1644,7 @@ def resolve_duplicate(db, data, actor):
 OPERATIONS["resolve_duplicate"] = resolve_duplicate
 
 
-def pool_activity(db, data, actor):
-    obs = unposted(db, data.observation_id)
+def build_pool_posting(db, data, obs):
     bank = scope(db, obs.account_id)
     fund = get(db, m.Fund, data.fund_id)
     party = get(db, m.Party, fund.beneficiary_id)
@@ -1705,31 +1785,54 @@ def pool_activity(db, data, actor):
                     amount_cents=amount,
                 )
             ]
-    result = post(
-        db,
-        s.Posting(
-            date=obs.date,
-            description=obs.description or "Pooled bank activity",
-            rationale=data.evidence,
-            kind="custody",
-            source={
-                "observation_id": obs.id,
-                "fund_id": fund.id,
-                "advance_item": data.advance_item,
-            },
-            observed=True,
-            release_reason=data.release_reason,
-            journals=journals,
-            management=management,
-        ),
-        actor,
+    posting = s.Posting(
+        date=obs.date,
+        description=obs.description or "Pooled bank activity",
+        rationale=data.evidence,
+        kind="custody",
+        source={
+            "observation_id": obs.id,
+            "fund_id": fund.id,
+            "advance_item": data.advance_item,
+        },
+        observed=True,
+        release_reason=data.release_reason,
+        journals=journals,
+        management=management,
     )
-    obs.event_id = result["event_id"]
-    obs.status = "posted"
+    return posting, advance
+
+
+def pool_activity(db, data, actor):
+    correcting = isinstance(data, s.PostedPoolInput)
+    if correcting:
+        from app.portfolio.observation_state import observation_state
+
+        obs = get(db, m.BankObservation, data.observation_id)
+        review = get(db, m.ReviewItem, data.review_id)
+        if (
+            review.observation_id != obs.id
+            or review.code != "suspense"
+            or review.status != "open"
+        ):
+            fail("review_state", "Choose this observation's open suspense review")
+        state = observation_state(db, obs.id)
+        if state["state_digest"] != data.expected_state_digest:
+            fail("stale_state", "Observation state changed; inspect it again")
+    else:
+        obs = unposted(db, data.observation_id)
+    posting, advance = build_pool_posting(db, data, obs)
+    if correcting:
+        result = post_existing_pool(db, posting, obs, review, state, actor)
+    else:
+        result = post(db, posting, actor)
+        obs.event_id = result["event_id"]
+        obs.status = "posted"
     return {**result, "advance_cents": advance}
 
 
 OPERATIONS["pool_activity"] = pool_activity
+OPERATIONS["correct_posted_pool"] = pool_activity
 
 
 def mortgage_payment(db, data, actor):
@@ -2417,3 +2520,919 @@ OPERATIONS.update(
     group_adjustment=group_adjustment,
     record_policy=record_policy,
 )
+
+
+def post_existing_pool(db, posting, obs, review, state, actor):
+    """Reuse custody builder; replace existing cash attribution, never cash."""
+    from app.portfolio.allocations import DIMENSIONS
+    from app.portfolio.reports import ledger
+
+    bank_scope = scope(db, obs.account_id)
+    check_date(db, bank_scope.entity_id, obs.date)
+    residuals = state["suspense_residuals"]["accrual"]
+    if residuals != state["suspense_residuals"]["modified_cash_bank_posting"]:
+        fail("basis_state", "Existing basis timing needs coordinated correction")
+    remaining = -sum(r["amount_cents"] for r in residuals)
+    applied = sum(
+        entry.debit_cents - entry.credit_cents
+        for journal in posting.journals
+        for entry in journal.lines
+        if scope(db, entry.account_id).role == "bank"
+    )
+    if (
+        remaining * obs.amount_cents <= 0
+        or applied * remaining <= 0
+        or abs(applied) > abs(remaining)
+        or any(r["entity_id"] != bank_scope.entity_id for r in residuals)
+    ):
+        fail("correction_residual", "Correction exceeds remaining scoped suspense")
+    partial = applied != remaining
+    if partial and len(residuals) != 1:
+        fail("correction_scope", "Partial correction requires one unresolved scope")
+    consumed = [dict(r) for r in residuals]
+    if partial:
+        consumed[0]["amount_cents"] = -applied
+    # A later correction must not be silently backdated into an older state.
+    if any(get(db, m.Event, ident).date > obs.date for ident in state["event_ids"]):
+        fail(
+            "correction_timing",
+            "Existing later corrections require dated split correction",
+        )
+    cash = [
+        r
+        for r in ledger(db, obs.date, event_ids=state["event_ids"])
+        if r["role"] == "bank"
+    ]
+    ids = {r["line_id"] for r in cash}
+    if len(ids) != 1 or any(r["account_id"] != obs.account_id for r in cash):
+        fail("cash_lineage", "This workflow requires one original physical bank line")
+    if sum(r["debit_cents"] - r["credit_cents"] for r in cash) != obs.amount_cents:
+        fail("cash_lineage", "Original bank movement does not match observation")
+    wanted = []
+    journals = []
+    for journal in posting.journals:
+        noncash = []
+        for entry in journal.lines:
+            if scope(db, entry.account_id).role == "bank":
+                if entry.account_id != obs.account_id:
+                    fail("cash_lineage", "Correction cannot add another bank movement")
+                wanted.append(entry)
+            else:
+                noncash.append(entry)
+        if journal.entity_id == bank_scope.entity_id:
+            noncash += [
+                line(
+                    r["account_id"],
+                    -r["amount_cents"],
+                    **{k: r.get(k) for k in DIMENSIONS},
+                )
+                for r in consumed
+            ]
+        journals.append(s.Journal(entity_id=journal.entity_id, lines=noncash))
+    if sum(x.debit_cents - x.credit_cents for x in wanted) != applied:
+        fail("allocation_total", "Allocation must equal the corrected amount")
+    # Consume only cash with the unresolved scope. Previously classified cash
+    # stays in the whole-line replacement unchanged, including its cash-flow tag.
+    retained = []
+    scope_keys = tuple(k for k in DIMENSIONS if k != "cash_flow")
+    for row in cash:
+        amount = row["debit_cents"] - row["credit_cents"]
+
+        def matches_scope(residual):
+            for key in scope_keys:
+                if row.get(key) == residual.get(key):
+                    continue
+                # Original bank suspense omits the unresolved bank fund on its
+                # offset. Only an explicitly unresolved fund can fill that gap.
+                if (
+                    key == "fund_id"
+                    and residual.get(key) is None
+                    and row.get(key) is not None
+                    and get(db, m.Fund, row[key]).purpose == "unresolved"
+                ):
+                    continue
+                return False
+            return True
+
+        matches = [r for r in consumed if r["amount_cents"] and matches_scope(r)]
+        if matches:
+            if len(matches) != 1:
+                fail("correction_scope", "Ambiguous unresolved cash scope")
+            target = matches[0]
+            consume = -target["amount_cents"]
+            if consume * amount <= 0 or abs(consume) > abs(amount):
+                fail("correction_scope", "Suspense does not match available cash scope")
+            amount -= consume
+            target["amount_cents"] = 0
+        if amount:
+            retained.append(
+                line(obs.account_id, amount, **{k: row.get(k) for k in DIMENSIONS})
+            )
+    if any(r["amount_cents"] for r in consumed):
+        fail("correction_scope", "Unresolved suspense has no matching cash scope")
+    wanted += retained
+    if sum(x.debit_cents - x.credit_cents for x in wanted) != obs.amount_cents:
+        fail("allocation_total", "Allocation must preserve exact original cash")
+    delta = [
+        line(
+            obs.account_id,
+            r["credit_cents"] - r["debit_cents"],
+            **{k: r.get(k) for k in DIMENSIONS},
+        )
+        for r in cash
+    ] + wanted
+    posting = posting.model_copy(
+        update={
+            "journals": journals,
+            "observed": False,
+            "kind": "posted_pool_correction",
+            "corrects_id": obs.event_id,
+        }
+    )
+    result = post(
+        db,
+        posting,
+        actor,
+        allocation_journals=[s.Journal(entity_id=bank_scope.entity_id, lines=delta)],
+    )
+    line_id = next(iter(ids))
+    prior = (
+        db.query(m.LineAllocation)
+        .filter_by(line_id=line_id)
+        .order_by(m.LineAllocation.date.desc(), m.LineAllocation.id.desc())
+        .first()
+    )
+    db.add(
+        m.LineAllocation(
+            line_id=line_id,
+            event_id=result["event_id"],
+            date=obs.date,
+            components=[
+                {
+                    "amount_cents": x.debit_cents - x.credit_cents,
+                    **x.model_dump(include=set(DIMENSIONS)),
+                }
+                for x in wanted
+            ],
+            evidence=posting.rationale,
+            supersedes_id=prior.id if prior else None,
+        )
+    )
+    db.flush()
+    from app.portfolio.observation_state import observation_state
+
+    final_state = observation_state(db, obs.id)
+    expected = [dict(r) for r in residuals] if partial else []
+    if partial:
+        expected[0]["amount_cents"] += applied
+    if any(rows != expected for rows in final_state["suspense_residuals"].values()):
+        fail("correction_residual", "Correction left unexpected scoped suspense")
+    if not partial:
+        review.status = "resolved"
+        review.resolution = posting.rationale
+        review.resolved_event_id = result["event_id"]
+    return {
+        **result,
+        "resolved_review_ids": [] if partial else [review.id],
+        "remaining_cents": remaining - applied,
+        "bank_cash_delta_cents": 0,
+        "allocation_line_id": line_id,
+    }
+
+
+def batch(db, data, actor):
+    """One transaction and retry identity for a dependent group of commands."""
+    parent_key = db.info["portfolio_command_key"]
+    forbidden = {"batch", "close_period", "reopen_period"}
+    if any(item.operation in forbidden for item in data.operations):
+        fail(
+            "batch_operation",
+            "Nested batches and period administration must run separately",
+        )
+    results = []
+    events = []
+    for index, item in enumerate(data.operations):
+        key = "batch-" + digest({"parent": parent_key, "index": index})
+        result = execute(
+            db, {"operation": item.operation, "key": key, "data": item.data}, actor
+        )
+        results.append(result)
+        events.extend(
+            result.get(
+                "event_ids", [result["event_id"]] if "event_id" in result else []
+            )
+        )
+    return {
+        "results": results,
+        "event_ids": list(dict.fromkeys(events)),
+        "operation_count": len(results),
+        "atomic": True,
+    }
+
+
+OPERATIONS["batch"] = batch
+
+
+def correct_posted_pool_split(db, data, actor):
+    from types import SimpleNamespace
+    from app.portfolio.observation_state import observation_state
+
+    obs = get(db, m.BankObservation, data.observation_id)
+    review = get(db, m.ReviewItem, data.review_id)
+    if (
+        review.observation_id != obs.id
+        or review.code != "suspense"
+        or review.status != "open"
+    ):
+        fail("review_state", "Choose this observation's open suspense review")
+    state = observation_state(db, obs.id)
+    if state["state_digest"] != data.expected_state_digest:
+        fail("stale_state", "Observation state changed; inspect it again")
+    remaining = -sum(r["amount_cents"] for r in state["suspense_residuals"]["accrual"])
+    total = sum(c.amount_cents for c in data.components)
+    if total * remaining <= 0 or abs(total) > abs(remaining):
+        fail("component_total", "Components exceed the remaining bank suspense")
+    journals = defaultdict(list)
+    management = []
+    advances = 0
+    release_reasons = []
+    for component in data.components:
+        if (
+            component.observation_id != obs.id
+            or component.amount_cents * obs.amount_cents <= 0
+        ):
+            fail(
+                "component_source",
+                "Each component must identify the same observation and direction",
+            )
+        # A value object supplies a component amount to the existing builder;
+        # the actual observation is never edited or reposted.
+        piece = SimpleNamespace(
+            id=obs.id,
+            account_id=obs.account_id,
+            date=obs.date,
+            description=obs.description,
+            amount_cents=component.amount_cents,
+        )
+        posting, advance = build_pool_posting(db, component, piece)
+        advances += advance
+        for journal in posting.journals:
+            journals[journal.entity_id].extend(journal.lines)
+        management.extend(posting.management)
+        if posting.release_reason:
+            release_reasons.append(posting.release_reason)
+    posting = s.Posting(
+        date=obs.date,
+        description="Correct pooled components",
+        rationale=data.evidence,
+        source={
+            "observation_id": obs.id,
+            "components": [c.model_dump(mode="json") for c in data.components],
+        },
+        journals=[s.Journal(entity_id=e, lines=lines) for e, lines in journals.items()],
+        management=management,
+        release_reason="; ".join(release_reasons) or None,
+    )
+    result = post_existing_pool(db, posting, obs, review, state, actor)
+    return {
+        **result,
+        "component_count": len(data.components),
+        "advance_cents": advances,
+    }
+
+
+OPERATIONS["correct_posted_pool_split"] = correct_posted_pool_split
+
+
+OPERATIONS["correct_posted_settlement"] = settle
+
+
+def correct_posted_internal_transfer(db, data, actor):
+    """Atomically route two existing, same-day pool legs; never create cash."""
+    from app.portfolio.observation_state import observation_state
+    from app.portfolio.reports import ledger
+    from app.portfolio.allocations import DIMENSIONS, effective_map
+
+    legs = []
+    for spec in (data.withdrawal, data.deposit):
+        obs = get(db, m.BankObservation, spec.observation_id)
+        review = get(db, m.ReviewItem, spec.review_id)
+        if (
+            review.observation_id != obs.id
+            or review.code != "suspense"
+            or review.status != "open"
+        ):
+            fail("review_state", "Each leg needs its own open suspense review")
+        state = observation_state(db, obs.id)
+        if state["state_digest"] != spec.expected_state_digest:
+            fail("stale_state", "Transfer leg changed; inspect it again")
+        legs.append((obs, review, state))
+    out, inc = (leg[0] for leg in legs)
+    a, b = scope(db, out.account_id), scope(db, inc.account_id)
+    if (
+        out.id == inc.id
+        or out.account_id == inc.account_id
+        or out.amount_cents >= 0
+        or out.amount_cents + inc.amount_cents
+    ):
+        fail("transfer_amount", "Select distinct equal opposite bank movements")
+    if not a.pooled or not b.pooled or a.entity_id != b.entity_id:
+        fail(
+            "transfer_scope",
+            "This variant requires two pooled banks of the same entity",
+        )
+    if out.date != inc.date:
+        fail(
+            "transfer_timing", "Different bank dates require a dated transit correction"
+        )
+    fund = get(db, m.Fund, data.fund_id)
+    if fund.holder_entity_id != a.entity_id or fund.purpose == "unresolved":
+        fail(
+            "transfer_fund", "Identify the proven beneficiary fund held by this entity"
+        )
+    noncash, deltas, replacements = [], [], []
+    for obs, review, state in legs:
+        if any(get(db, m.Event, ident).date > obs.date for ident in state["event_ids"]):
+            fail("correction_timing", "Later corrections require dated review")
+        residuals = state["suspense_residuals"]["accrual"]
+        if (
+            residuals != state["suspense_residuals"]["modified_cash_bank_posting"]
+            or sum(r["amount_cents"] for r in residuals) != -obs.amount_cents
+            or any(r["entity_id"] != a.entity_id for r in residuals)
+        ):
+            fail("correction_residual", "Each leg must retain its full scoped suspense")
+        cash = [
+            r
+            for r in ledger(db, obs.date, event_ids=state["event_ids"])
+            if r["role"] == "bank"
+        ]
+        if (
+            len(cash) != 1
+            or cash[0]["account_id"] != obs.account_id
+            or cash[0]["debit_cents"] - cash[0]["credit_cents"] != obs.amount_cents
+        ):
+            fail("cash_lineage", "Each leg requires one unchanged original bank line")
+        row = cash[0]
+        noncash.extend(
+            line(
+                r["account_id"], -r["amount_cents"], **{k: r.get(k) for k in DIMENSIONS}
+            )
+            for r in residuals
+        )
+        wanted = line(
+            obs.account_id,
+            obs.amount_cents,
+            fund_id=fund.id,
+            property_id=data.property_id or fund.property_id,
+            cash_flow="internal",
+        )
+        deltas.extend(
+            [
+                line(
+                    obs.account_id,
+                    -obs.amount_cents,
+                    **{k: row.get(k) for k in DIMENSIONS},
+                ),
+                wanted,
+            ]
+        )
+        replacements.append((row["line_id"], wanted))
+    result = post(
+        db,
+        s.Posting(
+            date=out.date,
+            description="Correct proven internal pooled transfer",
+            rationale=data.evidence,
+            kind="posted_internal_transfer",
+            release_reason=data.release_reason,
+            source={
+                "observation_ids": [out.id, inc.id],
+                "source_event_ids": [out.event_id, inc.event_id],
+            },
+            journals=[s.Journal(entity_id=a.entity_id, lines=noncash)],
+        ),
+        actor,
+        allocation_journals=[s.Journal(entity_id=a.entity_id, lines=deltas)],
+    )
+    prior = effective_map(db, line_ids=[ident for ident, _ in replacements])
+    for ident, wanted in replacements:
+        db.add(
+            m.LineAllocation(
+                line_id=ident,
+                event_id=result["event_id"],
+                date=out.date,
+                components=[
+                    {
+                        "amount_cents": wanted.debit_cents - wanted.credit_cents,
+                        **wanted.model_dump(include=set(DIMENSIONS)),
+                    }
+                ],
+                evidence=data.evidence,
+                supersedes_id=prior[ident].id if ident in prior else None,
+            )
+        )
+    db.flush()
+    for obs, review, _ in legs:
+        if any(observation_state(db, obs.id)["suspense_residuals"].values()):
+            fail("correction_residual", "Transfer did not clear scoped suspense")
+        review.status = "resolved"
+        review.resolution = data.evidence
+        review.resolved_event_id = result["event_id"]
+    return {
+        **result,
+        "resolved_review_ids": [r.id for _, r, _ in legs],
+        "bank_cash_delta_cents": 0,
+    }
+
+
+OPERATIONS["correct_posted_internal_transfer"] = correct_posted_internal_transfer
+
+
+def correct_posted_intercompany(db, data, actor):
+    """Correct proven debt purpose without asserting unresolved cash ownership."""
+    from app.portfolio.observation_state import observation_state
+    from app.portfolio.reports import ledger
+    from app.portfolio.allocations import DIMENSIONS
+
+    legs = []
+    for spec in (data.withdrawal, data.deposit):
+        obs = get(db, m.BankObservation, spec.observation_id)
+        review = get(db, m.ReviewItem, spec.review_id)
+        state = observation_state(db, obs.id)
+        if (
+            review.observation_id != obs.id
+            or review.code != "suspense"
+            or review.status != "open"
+        ):
+            fail("review_state", "Each leg needs its own open suspense review")
+        if state["state_digest"] != spec.expected_state_digest:
+            fail("stale_state", "Transfer leg changed; inspect it again")
+        if any(
+            get(db, m.Event, ident).date > data.date for ident in state["event_ids"]
+        ):
+            fail(
+                "correction_date",
+                "Correction cannot precede its source or prior corrections",
+            )
+        bank = scope(db, obs.account_id)
+        residuals = state["suspense_residuals"]["accrual"]
+        if (
+            residuals != state["suspense_residuals"]["modified_cash_bank_posting"]
+            or sum(r["amount_cents"] for r in residuals) != -obs.amount_cents
+            or any(r["entity_id"] != bank.entity_id for r in residuals)
+        ):
+            fail("correction_residual", "Each leg must retain its full scoped suspense")
+        cash = [
+            r
+            for r in ledger(db, data.date, event_ids=state["event_ids"])
+            if r["role"] == "bank"
+        ]
+        if (
+            not cash
+            or any(r["account_id"] != obs.account_id for r in cash)
+            or sum(r["debit_cents"] - r["credit_cents"] for r in cash)
+            != obs.amount_cents
+        ):
+            fail("cash_lineage", "Bank movement does not match the selected leg")
+        unknown = False
+        for row in cash:
+            if row["fund_id"]:
+                fund = get(db, m.Fund, row["fund_id"])
+                if fund.purpose == "unresolved":
+                    unknown = True
+                elif get(db, m.Party, fund.beneficiary_id).entity_id != bank.entity_id:
+                    fail(
+                        "client_financing",
+                        "Client funds require an explicit supported custody/financing workflow",
+                    )
+                elif fund.restriction != "unrestricted":
+                    fail(
+                        "restricted_funds",
+                        "Restricted cash cannot be classified as unrestricted company financing",
+                    )
+        legs.append((obs, review, state, bank, residuals, cash, unknown))
+    out, inc = legs
+    if (
+        out[0].amount_cents >= 0
+        or out[0].amount_cents + inc[0].amount_cents
+        or out[3].entity_id == inc[3].entity_id
+    ):
+        fail(
+            "transfer_amount",
+            "Select equal opposite movements of two different entities",
+        )
+    amount = inc[0].amount_cents
+    source_role, dest_role = (
+        ("due_from", "due_to") if data.purpose == "advance" else ("due_to", "due_from")
+    )
+    accounts = [
+        control(db, out[3].entity_id, source_role),
+        control(db, inc[3].entity_id, dest_role),
+    ]
+    if data.purpose == "repayment":
+        for index, account_id in enumerate(accounts):
+            rows = ledger(db, data.date, account_id=account_id)
+            available = sum(
+                r["debit_cents"] - r["credit_cents"]
+                for r in rows
+                if r["item"] == data.item
+                and r["counterparty_id"] == legs[1 - index][3].entity_id
+            )
+            if (available if index else -available) < amount:
+                fail("overpayment", "Repayment exceeds this exact entity pair and item")
+    journals = []
+    for index, leg in enumerate(legs):
+        obs, _, _, bank, residuals, _, _ = leg
+        journals.append(
+            s.Journal(
+                entity_id=bank.entity_id,
+                lines=[
+                    *[
+                        line(
+                            r["account_id"],
+                            -r["amount_cents"],
+                            **{k: r.get(k) for k in DIMENSIONS},
+                        )
+                        for r in residuals
+                    ],
+                    line(
+                        accounts[index],
+                        -obs.amount_cents,
+                        counterparty_id=legs[1 - index][3].entity_id,
+                        item=data.item,
+                    ),
+                ],
+            )
+        )
+    result = post(
+        db,
+        s.Posting(
+            date=data.date,
+            description="Correct intercompany " + data.purpose,
+            rationale=data.evidence,
+            kind="posted_intercompany",
+            journals=journals,
+            source={
+                "observation_ids": [leg[0].id for leg in legs],
+                "source_event_ids": [leg[0].event_id for leg in legs],
+                "purpose": data.purpose,
+                "item": data.item,
+            },
+        ),
+        actor,
+    )
+    funding_reviews = []
+    for index, leg in enumerate(legs):
+        obs, review, _, bank, _, cash, unknown = leg
+        for line_id in {row["line_id"] for row in cash}:
+            db.add(
+                m.CashClassification(
+                    line_id=line_id,
+                    event_id=result["event_id"],
+                    date=data.date,
+                    cash_flow=(
+                        "investing"
+                        if (index == 0) == (data.purpose == "advance")
+                        else "financing"
+                    ),
+                    reason=data.evidence,
+                )
+            )
+        if unknown:
+            flag = m.ReviewItem(
+                code="funding_source",
+                entity_id=bank.entity_id,
+                observation_id=obs.id,
+                event_id=result["event_id"],
+                detail="Intercompany purpose established; original unresolved fund attribution retained. Verify source ownership and financing independently.",
+            )
+            db.add(flag)
+            db.flush()
+            funding_reviews.append(flag.id)
+        if any(observation_state(db, obs.id)["suspense_residuals"].values()):
+            fail(
+                "correction_residual",
+                "Coordinated correction did not clear scoped suspense",
+            )
+        review.status = "resolved"
+        review.resolution = data.evidence
+        review.resolved_event_id = result["event_id"]
+    return {
+        **result,
+        "resolved_review_ids": [leg[1].id for leg in legs],
+        "open_funding_review_ids": funding_reviews,
+        "bank_cash_delta_cents": 0,
+    }
+
+
+OPERATIONS["correct_posted_intercompany"] = correct_posted_intercompany
+
+
+def correct_posted_party_balance(db, data, actor):
+    """Establish a distinct party loan item without intercompany ID coercion."""
+    from app.portfolio.observation_state import observation_state
+    from app.portfolio.reports import ledger
+    from app.portfolio.allocations import DIMENSIONS
+
+    party = get(db, m.Party, data.party_id)
+    if party.entity_id:
+        fail(
+            "maintained_party",
+            "Use coordinated intercompany accounting for a maintained entity",
+        )
+    obs = get(db, m.BankObservation, data.observation.observation_id)
+    review = get(db, m.ReviewItem, data.observation.review_id)
+    bank = scope(db, obs.account_id)
+    state = observation_state(db, obs.id)
+    if (
+        review.observation_id != obs.id
+        or review.code != "suspense"
+        or review.status != "open"
+    ):
+        fail("review_state", "Choose this observation's open suspense review")
+    if state["state_digest"] != data.observation.expected_state_digest:
+        fail("stale_state", "Observation changed; inspect it again")
+    if (obs.amount_cents < 0) != (data.kind == "party_receivable"):
+        fail(
+            "party_direction",
+            "Disbursements establish receivables; receipts establish payables",
+        )
+    if any(get(db, m.Event, ident).date > data.date for ident in state["event_ids"]):
+        fail(
+            "correction_date",
+            "Correction cannot precede its source or prior corrections",
+        )
+    residuals = state["suspense_residuals"]["accrual"]
+    if (
+        residuals != state["suspense_residuals"]["modified_cash_bank_posting"]
+        or sum(r["amount_cents"] for r in residuals) != -obs.amount_cents
+        or any(r["entity_id"] != bank.entity_id for r in residuals)
+    ):
+        fail(
+            "correction_residual", "Correct only the full remaining supported suspense"
+        )
+    cash = [
+        r
+        for r in ledger(db, data.date, event_ids=state["event_ids"])
+        if r["role"] == "bank"
+    ]
+    if (
+        not cash
+        or any(r["account_id"] != obs.account_id for r in cash)
+        or sum(r["debit_cents"] - r["credit_cents"] for r in cash) != obs.amount_cents
+    ):
+        fail("cash_lineage", "Bank lineage differs from the selected observation")
+    unknown = False
+    for row in cash:
+        if row["fund_id"]:
+            fund = get(db, m.Fund, row["fund_id"])
+            if fund.purpose == "unresolved":
+                unknown = True
+            elif (
+                get(db, m.Party, fund.beneficiary_id).entity_id != bank.entity_id
+                or fund.restriction != "unrestricted"
+            ):
+                fail(
+                    "client_financing",
+                    "A personal loan cannot consume client or restricted funds",
+                )
+    role = "receivable" if data.kind == "party_receivable" else "payable"
+    account_id = control(db, bank.entity_id, role)
+    result = post(
+        db,
+        s.Posting(
+            date=data.date,
+            description="Establish " + data.kind,
+            rationale=data.evidence,
+            kind="posted_party_balance",
+            corrects_id=obs.event_id,
+            source={
+                "observation_id": obs.id,
+                "party_id": party.id,
+                "party_balance_kind": data.kind,
+            },
+            journals=[
+                s.Journal(
+                    entity_id=bank.entity_id,
+                    lines=[
+                        *[
+                            line(
+                                r["account_id"],
+                                -r["amount_cents"],
+                                **{k: r.get(k) for k in DIMENSIONS},
+                            )
+                            for r in residuals
+                        ],
+                        line(
+                            account_id,
+                            -obs.amount_cents,
+                            property_id=data.property_id,
+                            item=data.code,
+                        ),
+                    ],
+                )
+            ],
+        ),
+        actor,
+    )
+    item = m.OpenItem(
+        code=data.code,
+        entity_id=bank.entity_id,
+        property_id=data.property_id,
+        event_id=result["event_id"],
+        kind=data.kind,
+        account_id=account_id,
+        control_id=account_id,
+        amount_cents=abs(obs.amount_cents),
+        date=data.date,
+    )
+    db.add(item)
+    for ident in {r["line_id"] for r in cash}:
+        db.add(
+            m.CashClassification(
+                line_id=ident,
+                event_id=result["event_id"],
+                date=data.date,
+                cash_flow=(
+                    "investing" if data.kind == "party_receivable" else "financing"
+                ),
+                reason=data.evidence,
+            )
+        )
+    db.flush()
+    if any(observation_state(db, obs.id)["suspense_residuals"].values()):
+        fail("correction_residual", "Correction did not clear scoped suspense")
+    review.status = "resolved"
+    review.resolution = data.evidence
+    review.resolved_event_id = result["event_id"]
+    funding_ids = []
+    if unknown:
+        flag = m.ReviewItem(
+            code="funding_source",
+            entity_id=bank.entity_id,
+            observation_id=obs.id,
+            event_id=result["event_id"],
+            detail="Party balance established; source fund ownership remains unresolved and unchanged.",
+        )
+        db.add(flag)
+        db.flush()
+        funding_ids.append(flag.id)
+    return {
+        **result,
+        "item_id": item.id,
+        "party_id": party.id,
+        "resolved_review_ids": [review.id],
+        "open_funding_review_ids": funding_ids,
+        "bank_cash_delta_cents": 0,
+    }
+
+
+OPERATIONS["correct_posted_party_balance"] = correct_posted_party_balance
+
+
+def validate_existing_correction(db, data, actor):
+    """Resolve an already satisfied suspense review without economic entries."""
+    from app.portfolio.observation_state import observation_state
+    from app.portfolio.reports import ledger
+
+    obs = get(db, m.BankObservation, data.observation.observation_id)
+    review = get(db, m.ReviewItem, data.observation.review_id)
+    if (
+        review.observation_id != obs.id
+        or review.code != "suspense"
+        or review.status != "open"
+    ):
+        fail("review_state", "Choose this observation's open suspense review")
+    state = observation_state(db, obs.id)
+    if state["state_digest"] != data.observation.expected_state_digest:
+        fail("stale_state", "Observation changed; inspect it again")
+    if (
+        data.corrective_event_id == obs.event_id
+        or data.corrective_event_id not in state["event_ids"]
+    ):
+        fail(
+            "correction_lineage",
+            "Identify a correction explicitly linked to this observation",
+        )
+    if any(state["suspense_residuals"].values()):
+        fail(
+            "correction_residual",
+            "Scoped suspense remains on one or both reporting bases",
+        )
+    bank = scope(db, obs.account_id)
+    correction = get(db, m.Event, data.corrective_event_id)
+    if (
+        not db.query(m.JournalScope)
+        .filter_by(event_id=correction.id, entity_id=bank.entity_id)
+        .first()
+    ):
+        fail("wrong_entity", "Correction does not belong to the observed bank entity")
+    if state["bank_movements"] != [
+        {
+            "account_id": obs.account_id,
+            "date": obs.date.isoformat(),
+            "amount_cents": obs.amount_cents,
+        }
+    ]:
+        fail(
+            "cash_lineage",
+            "This validation requires the original bank movement without other economic legs",
+        )
+    dimensions = ("property_id", "unit_id", "fund_id", "counterparty_id", "item")
+    identities = set()
+    for expected in data.balances:
+        account = scope(db, expected.account_id, bank.entity_id)
+        if (
+            account.role in ("bank", "bridge", "suspense_credit", "suspense_debit")
+            or expected.amount_cents == 0
+        ):
+            fail(
+                "expected_balance",
+                "Identify the nonzero supported economic classification",
+            )
+        identity = (expected.account_id, *(getattr(expected, k) for k in dimensions))
+        if identity in identities:
+            fail("expected_balance", "Each expected scope must be unique")
+        identities.add(identity)
+        if account.role in (
+            "receivable",
+            "payable",
+            "custody_asset",
+            "custody_liability",
+        ):
+            if not expected.party_id:
+                fail(
+                    "missing_beneficiary",
+                    "Identify the supported obligation beneficiary",
+                )
+            get(db, m.Party, expected.party_id)
+            if expected.fund_id:
+                if (
+                    get(db, m.Fund, expected.fund_id).beneficiary_id
+                    != expected.party_id
+                ):
+                    fail("wrong_beneficiary", "Fund and specified beneficiary disagree")
+            elif (correction.source or {}).get("party_id") != expected.party_id:
+                fail(
+                    "missing_beneficiary",
+                    "Correction has no typed association to this party; retain the review",
+                )
+        for basis in ("accrual", "modified_cash_bank_posting"):
+            rows = ledger(
+                db,
+                date.max,
+                account_id=expected.account_id,
+                basis=basis,
+                event_ids=state["event_ids"],
+            )
+            matching = [
+                r
+                for r in rows
+                if all(r.get(k) == getattr(expected, k) for k in dimensions)
+            ]
+            amount = sum(r["debit_cents"] - r["credit_cents"] for r in matching)
+            if amount != expected.amount_cents or not any(
+                r["event_id"] == correction.id for r in matching
+            ):
+                fail(
+                    "expected_balance",
+                    "Linked correction does not establish the stated scope and amount on both bases",
+                )
+    expected_totals = {
+        (row.account_id, *(getattr(row, k) for k in dimensions)): row.amount_cents
+        for row in data.balances
+    }
+    for basis in ("accrual", "modified_cash_bank_posting"):
+        actual = defaultdict(int)
+        for row in ledger(db, date.max, basis=basis, event_ids=state["event_ids"]):
+            if row["role"] == "bank" or row["role"].startswith("suspense"):
+                continue
+            actual[(row["account_id"], *(row.get(k) for k in dimensions))] += (
+                row["debit_cents"] - row["credit_cents"]
+            )
+        if {key: amount for key, amount in actual.items() if amount} != expected_totals:
+            fail(
+                "expected_balance",
+                "Expected balances must describe the entire effective economic classification",
+            )
+    review.status = "resolved"
+    review.resolved_event_id = correction.id
+    review.resolution = json.dumps(
+        {
+            "method": "validated_existing_correction",
+            "evidence": data.evidence,
+            "state_digest": state["state_digest"],
+            "balances": [row.model_dump() for row in data.balances],
+        },
+        sort_keys=True,
+    )
+    return {
+        "review_id": review.id,
+        "resolved_review_ids": [review.id],
+        "validated_event_id": correction.id,
+        "new_financial_events": 0,
+        "bank_cash_delta_cents": 0,
+    }
+
+
+OPERATIONS["validate_existing_correction"] = validate_existing_correction

@@ -126,6 +126,27 @@ def _cost_type_of(db: Session, cost_code_id) -> str | None:
     return code.cost_type if code else None
 
 
+# The split memo column's width (String(300)). A reversal prefixes "VOID: "
+# to the original memo, so a memo of 295-300 characters came out 301-306 and
+# PostgreSQL refused the row at commit: the void answered 500 and the entry
+# could never be voided. A void is system-generated, so its memo is cut to fit
+# rather than refused; the original line keeps its full text.
+LINE_MEMO_MAX = TransactionLine.__table__.c.description.type.length
+
+
+def fit_line_memo(text: str | None) -> str | None:
+    """A memo the app copies onto a split from somewhere wider (a prefix
+    plus a document's own text), cut to the column's width. The document
+    keeps its full text; only the posted split's copy is shortened."""
+    return text[:LINE_MEMO_MAX] if text else text
+
+
+def void_line_memo(description: str | None) -> str:
+    """The memo for a reversing line: "VOID: " + the original, cut to the
+    column's width so voiding never fails on the length of a memo."""
+    return fit_line_memo(f"VOID: {description or ''}")
+
+
 def reversing_lines(lines) -> list[dict]:
     """Mirror-image line dicts for a void: debit and credit swapped, the
     description prefixed VOID:, and every dimension (job, class, cost code,
@@ -137,7 +158,7 @@ def reversing_lines(lines) -> list[dict]:
             "account_id": ol.account_id,
             "debit": ol.credit,
             "credit": ol.debit,
-            "description": f"VOID: {ol.description or ''}",
+            "description": void_line_memo(ol.description),
             "job_id": ol.job_id,
             "class_id": ol.class_id,
             "cost_code_id": ol.cost_code_id,

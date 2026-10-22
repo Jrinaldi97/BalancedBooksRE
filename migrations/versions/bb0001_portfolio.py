@@ -26,10 +26,14 @@ def upgrade():
 
 
 def downgrade():
-    from sqlalchemy import select, func
+    from sqlalchemy import select, func, inspect
 
     bind = op.get_bind()
-    tables = [t for t in Base.metadata.sorted_tables if t.name.startswith("re_")]
+    tables = [
+        t
+        for t in Base.metadata.sorted_tables
+        if t.name.startswith("re_") and inspect(bind).has_table(t.name)
+    ]
     if any(bind.execute(select(func.count()).select_from(t)).scalar() for t in tables):
         raise RuntimeError(
             "Portfolio records exist; restore a verified pre-upgrade backup instead of discarding accounting history."
