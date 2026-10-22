@@ -1494,7 +1494,7 @@ def test_context_identifies_company_and_command_contract(db_session):
     identity = context(db_session)["connection"]
     assert identity["company_name"] == "Synthetic test company"
     assert identity["command_schema_digest"] == digest(commands())
-    assert identity["portfolio_release"] == "2026.10-maintenance.1"
+    assert identity["portfolio_release"] == "2026.10-pooled-corrections.2"
     assert identity["database_engine"] == "sqlite"
 
 
@@ -1993,3 +1993,426 @@ def test_allocation_migration_refuses_to_discard_recorded_history(
     with pytest.raises(RuntimeError, match="cannot be discarded"):
         migration.downgrade()
     assert db.query(m.LineAllocation).count() == 1
+
+
+@pytest.fixture
+def correction_pool(db_session):
+    db = db_session
+    holder = entity(db, "CP")
+    bank = account(
+        db, holder, "pool", "asset", "bank", pooled=True, coverage_start="2026-01-01"
+    )
+    unknown = run(db, "create_party", code="UNKNOWN", name="Unknown")["party_id"]
+    client = run(db, "create_party", code="CLIENT", name="Client")["party_id"]
+    funds = []
+    for code, party, purpose in [
+        ("U", unknown, "unresolved"),
+        ("U2", unknown, "unresolved"),
+        ("C", client, "general"),
+    ]:
+        funds.append(
+            run(
+                db,
+                "create_fund",
+                code=code,
+                holder_entity_id=holder,
+                beneficiary_id=party,
+                purpose=purpose,
+            )["fund_id"]
+        )
+    return db, holder, bank, funds
+
+
+def pool_correction(db, obs, fund):
+    from app.portfolio.observation_state import observation_state
+
+    review = db.query(m.ReviewItem).filter_by(observation_id=obs, code="suspense").one()
+    return dict(
+        observation_id=obs,
+        review_id=review.id,
+        fund_id=fund,
+        expected_state_digest=observation_state(db, obs)["state_digest"],
+        evidence="Verified source",
+    )
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_legacy_zero_net_bank_history_preserved(correction_pool, legacy):
+    from app.models.transactions import TransactionLine
+    from app.portfolio.observation_state import observation_state
+
+    db, holder, bank, (unknown, second, client) = correction_pool
+    obs = bank_rows(db, bank, [{"date": "2026-02-01", "amount_cents": 240000}])[0]
+    original = run(
+        db, "post_bank", observation_id=obs, fund_id=unknown, rationale="Unidentified"
+    )
+    if legacy:
+        journal(
+            db,
+            holder,
+            "2026-02-01",
+            [ln(bank, -240000, fund_id=unknown), ln(bank, 240000, fund_id=second)],
+            corrects_id=original["event_id"],
+            source={"observation_id": obs},
+        )
+    physical = [
+        (r.id, r.account_id, r.debit, r.credit)
+        for r in db.query(TransactionLine).filter_by(account_id=bank)
+    ]
+    data = pool_correction(db, obs, client)
+    command = {
+        "operation": "correct_posted_pool",
+        "key": uuid.uuid4().hex,
+        "data": data,
+    }
+    result = execute(db, command)
+    assert execute(db, command)["replayed"]
+    assert result["review_lifecycle"]["gross_closures"] == 1
+    assert physical == [
+        (r.id, r.account_id, r.debit, r.credit)
+        for r in db.query(TransactionLine).filter_by(account_id=bank)
+    ]
+    assert balance(db, bank, fund_id=client) == 240000
+    assert balance(db, bank, fund_id=unknown) == balance(db, bank, fund_id=second) == 0
+    assert not any(observation_state(db, obs)["suspense_residuals"].values())
+    for basis in ("accrual", "modified_cash_bank_posting"):
+        assert all(
+            v == 0
+            for v in statements(
+                db, date(2026, 1, 1), date(2026, 12, 31), [holder], basis=basis
+            )["checks"].values()
+        )
+
+
+def test_existing_withdrawal_does_not_require_funding_twice(correction_pool):
+    db, holder, bank, (unknown, second, client) = correction_pool
+    receipt, payment = bank_rows(
+        db,
+        bank,
+        [
+            {"date": "2026-02-01", "amount_cents": 250000},
+            {"date": "2026-02-01", "amount_cents": -250000},
+        ],
+    )
+    run(
+        db,
+        "pool_activity",
+        observation_id=receipt,
+        fund_id=client,
+        evidence="Verified receipt",
+    )
+    original = run(
+        db, "post_bank", observation_id=payment, fund_id=unknown, rationale="Payment"
+    )
+    # Synthetic legacy state: bank attribution was corrected but the offset
+    # remained suspense. This is not a production mutation or public bypass.
+    from app.portfolio.reports import ledger
+
+    cash = next(
+        r
+        for r in ledger(db, date(2026, 2, 1), event_ids=[original["event_id"]])
+        if r["role"] == "bank"
+    )
+    db.add(
+        m.LineAllocation(
+            line_id=cash["line_id"],
+            event_id=original["event_id"],
+            date=date(2026, 2, 1),
+            evidence="Legacy attribution fixture",
+            components=[{"amount_cents": -250000, "fund_id": client}],
+        )
+    )
+    db.flush()
+    assert balance(db, bank, fund_id=client) == 0
+    result = run(db, "correct_posted_pool", **pool_correction(db, payment, client))
+    assert result["advance_cents"] == 0
+    assert balance(db, control(db, holder, "custody_liability"), fund_id=client) == 0
+
+
+def test_exposed_source_deficit_is_diagnosed_and_atomic(correction_pool):
+    db, holder, bank, (unknown, second, client) = correction_pool
+    receipt, payment = bank_rows(
+        db,
+        bank,
+        [
+            {"date": "2026-02-01", "amount_cents": 33000},
+            {"date": "2026-02-01", "amount_cents": -20000},
+        ],
+    )
+    for obs in (receipt, payment):
+        run(
+            db,
+            "post_bank",
+            observation_id=obs,
+            fund_id=unknown,
+            rationale="Unidentified",
+        )
+    before = db.query(m.Event).count()
+    with pytest.raises(Problem) as error:
+        run(db, "correct_posted_pool", **pool_correction(db, receipt, client))
+    assert error.value.code == "allocation_source_deficit"
+    assert error.value.details["after_cents"] == -20000
+    assert error.value.details["physical_cash_delta_cents"] == 0
+    assert db.query(m.Event).count() == before
+    assert db.query(m.LineAllocation).count() == 0
+
+
+def test_historical_alert_resolution_does_not_use_later_deficit(portfolio):
+    from app.portfolio.assessments import shortage_assessment
+
+    db, e, bank, expense, income = portfolio
+    outgoing, incoming, later = bank_rows(
+        db,
+        bank,
+        [
+            {"date": "2026-02-01", "amount_cents": -150000},
+            {"date": "2026-02-01", "amount_cents": 50000},
+            {"date": "2026-03-01", "amount_cents": -10000},
+        ],
+    )
+    run(
+        db,
+        "post_bank",
+        observation_id=outgoing,
+        offset_account_id=expense,
+        rationale="Actual payment",
+    )
+    alert = db.query(m.ReviewItem).filter_by(code="actual_shortage").one()
+    run(
+        db,
+        "post_bank",
+        observation_id=incoming,
+        offset_account_id=income,
+        rationale="Actual receipt",
+    )
+    run(
+        db,
+        "post_bank",
+        observation_id=later,
+        offset_account_id=expense,
+        rationale="Later payment",
+    )
+    assessment = shortage_assessment(db, alert.id, date(2026, 2, 28))
+    data = dict(
+        review_id=alert.id,
+        as_of="2026-02-28",
+        expected_assessment_digest=assessment["assessment_digest"],
+        corrective_event_id=alert.event_id,
+        reason="import_order_artifact",
+        evidence="Same-day receipt supported",
+        coverage_evidence="Complete bank statements and verified opening",
+    )
+    with pytest.raises(Problem) as error:
+        run(db, "resolve_historical_shortage", **data)
+    assert error.value.code == "missing_reconciliation"
+    run(
+        db,
+        "reconcile",
+        account_id=bank,
+        start="2026-01-01",
+        end="2026-02-28",
+        opening_cents=100000,
+        ending_cents=0,
+    )
+    result = run(db, "resolve_historical_shortage", **data)
+    assert result["financial_entries_added"] is False
+    assert db.get(m.ReviewItem, alert.id).status == "resolved"
+    assert (
+        db.query(m.ReviewItem).filter_by(code="actual_shortage", status="open").count()
+        == 1
+    )
+
+
+@pytest.mark.parametrize("supported", [False, True])
+def test_incoming_member_loan_cash_origin_is_separate(correction_pool, supported):
+    from app.portfolio.observation_state import observation_state
+
+    db, holder, bank, (unknown, second, client) = correction_pool
+    owner = db.query(m.Party).filter_by(entity_id=holder).one().id
+    own = run(
+        db,
+        "create_fund",
+        code="OWN",
+        holder_entity_id=holder,
+        beneficiary_id=owner,
+        purpose="general",
+    )["fund_id"]
+    lender = run(db, "create_party", code="JOSEPH", name="Joseph")["party_id"]
+    obs = bank_rows(db, bank, [{"date": "2026-02-01", "amount_cents": 50000}])[0]
+    run(db, "post_bank", observation_id=obs, fund_id=unknown, rationale="Statement")
+    review = db.query(m.ReviewItem).filter_by(observation_id=obs, code="suspense").one()
+    data = dict(
+        observation={
+            "observation_id": obs,
+            "review_id": review.id,
+            "expected_state_digest": observation_state(db, obs)["state_digest"],
+        },
+        party_id=lender,
+        code="JOSEPH-500",
+        kind="party_payable",
+        date="2026-02-01",
+        evidence="Confirmed loan",
+    )
+    if supported:
+        data.update(
+            source_own_fund_id=own,
+            lender_source_evidence="Lender and company loan source confirmed",
+        )
+    result = run(db, "correct_posted_party_balance", **data)
+    assert balance(db, control(db, holder, "payable"), item="JOSEPH-500") == -50000
+    assert balance(db, bank, fund_id=own) == (50000 if supported else 0)
+    assert len(result["open_funding_review_ids"]) == (0 if supported else 1)
+    assert result["review_lifecycle"]["net_open_reduction"] == (1 if supported else 0)
+    if not supported:
+        resolution = dict(
+            review_id=result["open_funding_review_ids"][0],
+            observation_id=obs,
+            expected_state_digest=observation_state(db, obs)["state_digest"],
+            loan_event_id=result["event_id"],
+            lender_party_id=lender,
+            evidence="Lender confirms this specific incoming loan",
+        )
+        with pytest.raises(Problem, match="lender"):
+            run(
+                db,
+                "resolve_loan_funding_source",
+                **{**resolution, "lender_party_id": owner},
+            )
+        event_count = db.query(m.Event).count()
+        command = dict(
+            operation="resolve_loan_funding_source",
+            key=uuid.uuid4().hex,
+            data=resolution,
+        )
+        resolved = execute(db, command)
+        assert execute(db, command)["replayed"]
+        assert resolved["unrelated_funding_not_certified"]
+        assert db.query(m.Event).count() == event_count
+        assert balance(db, bank, fund_id=unknown) == 50000
+
+
+@pytest.mark.parametrize("bad_kind", ["date", "other_observation", "amount"])
+def test_legacy_cash_normalizer_rejects_unproven_history(correction_pool, bad_kind):
+    db, holder, bank, (unknown, second, client) = correction_pool
+    obs = bank_rows(db, bank, [{"date": "2026-02-01", "amount_cents": 240000}])[0]
+    original = run(
+        db, "post_bank", observation_id=obs, fund_id=unknown, rationale="Statement"
+    )
+    day = "2026-02-02" if bad_kind == "date" else "2026-02-01"
+    source = {"observation_id": obs + 1 if bad_kind == "other_observation" else obs}
+    lines = [ln(bank, -240000, fund_id=unknown), ln(bank, 240000, fund_id=second)]
+    if bad_kind == "amount":
+        lines = [
+            ln(bank, 100, fund_id=unknown),
+            ln(control(db, holder, "equity"), -100),
+        ]
+    journal(db, holder, day, lines, corrects_id=original["event_id"], source=source)
+    before = db.query(m.Event).count()
+    with pytest.raises(Problem):
+        run(db, "correct_posted_pool", **pool_correction(db, obs, client))
+    assert db.query(m.Event).count() == before
+    assert db.query(m.LineAllocation).count() == 0
+
+
+def test_pool_preview_exposes_lifecycle_and_preserves_state(client, correction_pool):
+    db, holder, bank, (unknown, second, fund) = correction_pool
+    obs = bank_rows(db, bank, [{"date": "2026-02-01", "amount_cents": 240000}])[0]
+    run(db, "post_bank", observation_id=obs, fund_id=unknown, rationale="Statement")
+    command = dict(
+        operation="correct_posted_pool",
+        key=uuid.uuid4().hex,
+        data=pool_correction(db, obs, fund),
+    )
+    before = db.query(m.Event).count()
+    preview = client.post("/api/portfolio/proposals", json=command)
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    result = body["preview"]["result"]
+    assert result["committed"] is False
+    assert result["review_lifecycle"]["gross_closures"] == 1
+    assert result["affected_fund_scopes"]
+    assert db.query(m.Event).count() == before
+    assert db.query(m.LineAllocation).count() == 0
+    response = client.post(
+        f"/api/portfolio/proposals/{body['proposal_id']}/commit",
+        json={"digest": body["digest"]},
+    )
+    assert response.status_code == 200, response.text
+    assert balance(db, bank, fund_id=fund) == 240000
+
+
+def test_legacy_allocation_artifact_requires_relevant_correction_and_coverage(
+    correction_pool,
+):
+    from app.portfolio.assessments import shortage_assessment
+
+    db, holder, bank, (unknown, second, client) = correction_pool
+    small, funding, outgoing = bank_rows(
+        db,
+        bank,
+        [
+            {"date": "2026-01-01", "amount_cents": 10000},
+            {"date": "2026-01-01", "amount_cents": 50000},
+            {"date": "2026-02-01", "amount_cents": -30000},
+        ],
+    )
+    first = run(
+        db, "post_bank", observation_id=small, fund_id=unknown, rationale="Statement"
+    )
+    run(
+        db,
+        "pool_activity",
+        observation_id=funding,
+        fund_id=client,
+        evidence="Client funds",
+    )
+    original = run(
+        db, "post_bank", observation_id=outgoing, fund_id=unknown, rationale="Statement"
+    )
+    alert = (
+        db.query(m.ReviewItem)
+        .filter_by(event_id=original["event_id"], code="actual_shortage")
+        .one()
+    )
+    correction = journal(
+        db,
+        holder,
+        "2026-02-01",
+        [
+            ln(bank, 30000, fund_id=unknown),
+            ln(bank, -30000, fund_id=client),
+            ln(control(db, holder, "custody_liability"), 30000, fund_id=client),
+            ln(control(db, holder, "suspense_debit"), -30000),
+        ],
+        corrects_id=original["event_id"],
+        source={"observation_id": outgoing},
+    )
+    run(
+        db,
+        "reconcile",
+        account_id=bank,
+        start="2026-01-01",
+        end="2026-02-28",
+        opening_cents=0,
+        ending_cents=30000,
+    )
+    assessment = shortage_assessment(db, alert.id, date(2026, 2, 28))
+    data = dict(
+        review_id=alert.id,
+        as_of="2026-02-28",
+        expected_assessment_digest=assessment["assessment_digest"],
+        corrective_event_id=correction["event_id"],
+        reason="source_allocation_corrected",
+        evidence="Client payment confirmed",
+        coverage_evidence="Complete supported bank statements",
+    )
+    with pytest.raises(Problem, match="disproves"):
+        run(
+            db,
+            "resolve_historical_shortage",
+            **{**data, "corrective_event_id": first["event_id"]},
+        )
+    key = uuid.uuid4().hex
+    command = dict(operation="resolve_historical_shortage", key=key, data=data)
+    assert execute(db, command)["financial_entries_added"] is False
+    assert execute(db, command)["replayed"]

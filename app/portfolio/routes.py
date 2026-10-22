@@ -27,7 +27,11 @@ def error(exc):
     if isinstance(exc, svc.Problem):
         return HTTPException(
             404 if exc.code == "not_found" else 409,
-            detail={"code": exc.code, "message": str(exc)},
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                **({"diagnostics": exc.details} if exc.details else {}),
+            },
         )
     if isinstance(exc, ValidationError):
         return HTTPException(
@@ -87,7 +91,7 @@ def context(db: Session = Depends(get_db)):
             "company_file": Path(database).name if database else None,
             "database_engine": db.get_bind().dialect.name,
             "upstream_base_version": __version__,
-            "portfolio_release": "2026.10-maintenance.1",
+            "portfolio_release": "2026.10-pooled-corrections.2",
             "schema_revisions": versions,
             "command_schema_digest": svc.digest(commands()),
         },

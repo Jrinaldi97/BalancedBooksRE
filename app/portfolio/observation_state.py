@@ -93,5 +93,25 @@ def observation_state(db, observation_id, through=None):
         "reviews": reviews,
         "scope": "Explicit observation references and correction descendants; unrelated journals are not inferred.",
     }
+    from app.portfolio.cash_lineage import normalized_cash
+    from app.portfolio.service import Problem
+
+    if obs.event_id:
+        try:
+            normalized, physical = normalized_cash(db, obs, state)
+            state["cash_lineage"] = {
+                "supported": True,
+                "physical_line_ids": sorted(r["line_id"] for r in physical),
+                "net_amount_cents": sum(
+                    r["debit_cents"] - r["credit_cents"] for r in normalized
+                ),
+                "effective_components": normalized,
+            }
+        except Problem as exc:
+            state["cash_lineage"] = {
+                "supported": False,
+                "code": exc.code,
+                "message": str(exc),
+            }
     state["state_digest"] = digest(state)
     return state

@@ -18,7 +18,8 @@ from app.portfolio import models as m, schemas as s
 
 
 class Problem(ValueError):
-    def __init__(self, code, message):
+    def __init__(self, code, message, details=None):
+        self.details = details
         self.code = code
         super().__init__(message)
 
@@ -379,7 +380,7 @@ def validate_lines(db, entity_id, lines, balanced=True):
             fail("missing_fund", "Custody controls require a fund")
 
 
-def post(db, data, actor, allocation_journals=()):
+def post(db, data, actor, allocation_journals=(), correction_custody_baselines=None):
     reciprocal = defaultdict(int)
     cash_changes = defaultdict(int)
     custodial = defaultdict(int)
@@ -417,7 +418,10 @@ def post(db, data, actor, allocation_journals=()):
             "reciprocal_mismatch",
             "Intercompany entries must update both entities for the same item",
         )
-    if any(fund_movement.values()):
+    if any(
+        amount and (correction_custody_baselines or {}).get(fund) != -amount
+        for fund, amount in fund_movement.items()
+    ):
         fail(
             "custody_coverage",
             "Beneficiary bank attribution must match the holder custody liability",
@@ -447,9 +451,37 @@ def post(db, data, actor, allocation_journals=()):
                 balance(db, account_id, data.date, fund_id) + amount < 0
                 and not data.observed
             ):
-                fail(
-                    "insufficient_funds",
-                    "Fund has insufficient supported holdings; record explicit financing first",
+                details = {
+                    "kind": "existing_cash_reallocation"
+                    if allocation_journals
+                    else "new_release",
+                    "date": data.date.isoformat(),
+                    "account_id": account_id,
+                    "fund_id": fund_id,
+                    "fund_purpose": fund.purpose,
+                    "before_cents": balance(db, account_id, data.date, fund_id),
+                    "delta_cents": amount,
+                    "after_cents": balance(db, account_id, data.date, fund_id) + amount,
+                    "physical_cash_delta_cents": account_changes[account_id],
+                    "source": data.source,
+                    "affected_scopes": [
+                        {
+                            "account_id": a,
+                            "fund_id": f,
+                            "before_cents": balance(db, a, data.date, f),
+                            "delta_cents": n,
+                            "after_cents": balance(db, a, data.date, f) + n,
+                        }
+                        for (a, f), n in cash_changes.items()
+                    ],
+                    "required_evidence": "Proven source allocations or linked funding that removes this deficit; an atomic batch may establish supported dependencies. No financing is inferred.",
+                }
+                raise Problem(
+                    "allocation_source_deficit"
+                    if allocation_journals
+                    else "insufficient_funds",
+                    "Fund has insufficient supported holdings; resolve the identified funding dependency",
+                    details,
                 )
         if (
             sc.role == "bank"
@@ -939,7 +971,9 @@ def match_transfer(db, data, actor):
         (
             "internal"
             if a.entity_id == b.entity_id
-            else "investing" if data.purpose == "advance" else "financing"
+            else "investing"
+            if data.purpose == "advance"
+            else "financing"
         ),
         data.evidence,
     )
@@ -1033,7 +1067,9 @@ def match_transfer(db, data, actor):
         (
             "internal"
             if a.entity_id == b.entity_id
-            else "financing" if data.purpose == "advance" else "investing"
+            else "financing"
+            if data.purpose == "advance"
+            else "investing"
         ),
         data.evidence,
     )
@@ -1431,7 +1467,7 @@ def reconcile(db, data, actor):
     if difference or unposted_ids or book != data.ending_cents:
         fail(
             "reconciliation_difference",
-            f"Statement difference {difference} cents; unposted observations {unposted_ids}; book versus statement {book-data.ending_cents} cents",
+            f"Statement difference {difference} cents; unposted observations {unposted_ids}; book versus statement {book - data.ending_cents} cents",
         )
     row = m.Reconciliation(
         **data.model_dump(),
@@ -1593,12 +1629,58 @@ def execute(db, command, actor="codex"):
     with db.begin_nested():
         db.info["portfolio_command_key"] = command.key
         db.info["portfolio_event_ordinal"] = 0
+        tracked = command.operation.startswith(
+            "correct_posted_"
+        ) or command.operation in {
+            "validate_existing_correction",
+            "resolve_historical_shortage",
+            "resolve_loan_funding_source",
+        }
+        before_reviews = (
+            {r.id: r.status for r in db.query(m.ReviewItem)} if tracked else {}
+        )
         try:
             result = OPERATIONS[command.operation](db, data, actor)
         finally:
             db.info.pop("portfolio_command_key", None)
             db.info.pop("portfolio_event_ordinal", None)
         db.flush()
+        if tracked:
+            changed = [
+                r
+                for r in db.query(m.ReviewItem)
+                if r.id not in before_reviews or r.status != before_reviews[r.id]
+            ]
+            closed = [
+                r.id
+                for r in changed
+                if before_reviews.get(r.id) == "open" and r.status == "resolved"
+            ]
+            new_open = [
+                r.id
+                for r in changed
+                if r.id not in before_reviews and r.status == "open"
+            ]
+            result["review_lifecycle"] = {
+                "preexisting_closed_ids": closed,
+                "new_open_ids": new_open,
+                "gross_closures": len(closed),
+                "new_open_count": len(new_open),
+                "net_open_reduction": len(closed) - len(new_open),
+                "transitions": [
+                    {
+                        "review_id": r.id,
+                        "previous_status": before_reviews.get(r.id),
+                        "status": r.status,
+                        "code": r.code,
+                        "observation_id": r.observation_id,
+                        "event_id": r.event_id,
+                        "detail": r.detail,
+                        "replaces_review_ids": closed if r.id in new_open else [],
+                    }
+                    for r in changed
+                ],
+            }
         for entity in db.query(m.Entity).all():
             entity.revision += 1
         result = {
@@ -1644,7 +1726,7 @@ def resolve_duplicate(db, data, actor):
 OPERATIONS["resolve_duplicate"] = resolve_duplicate
 
 
-def build_pool_posting(db, data, obs):
+def build_pool_posting(db, data, obs, existing_state=None):
     bank = scope(db, obs.account_id)
     fund = get(db, m.Fund, data.fund_id)
     party = get(db, m.Party, fund.beneficiary_id)
@@ -1655,6 +1737,22 @@ def build_pool_posting(db, data, obs):
     amount = obs.amount_cents
     prop = data.property_id or fund.property_id
     held = balance(db, obs.account_id, obs.date, fund.id)
+    if existing_state is not None:
+        # Replace this observation's attribution, not a hypothetical second
+        # withdrawal. Scope removal is checked atomically by post_existing_pool.
+        from app.portfolio.cash_lineage import normalized_cash
+
+        cash, _ = normalized_cash(
+            db, get(db, m.BankObservation, obs.id), existing_state
+        )
+        selected = sum(
+            r["debit_cents"] - r["credit_cents"]
+            for r in cash
+            if r.get("fund_id") == fund.id
+        )
+        # Partial corrections may replace only their signed share.
+        if selected * amount > 0:
+            held -= (1 if selected > 0 else -1) * min(abs(selected), abs(amount))
     if amount < 0 and fund.restriction != "unrestricted" and not data.release_reason:
         fail(
             "restricted_funds",
@@ -1821,7 +1919,7 @@ def pool_activity(db, data, actor):
             fail("stale_state", "Observation state changed; inspect it again")
     else:
         obs = unposted(db, data.observation_id)
-    posting, advance = build_pool_posting(db, data, obs)
+    posting, advance = build_pool_posting(db, data, obs, state if correcting else None)
     if correcting:
         result = post_existing_pool(db, posting, obs, review, state, actor)
     else:
@@ -2525,7 +2623,6 @@ OPERATIONS.update(
 def post_existing_pool(db, posting, obs, review, state, actor):
     """Reuse custody builder; replace existing cash attribution, never cash."""
     from app.portfolio.allocations import DIMENSIONS
-    from app.portfolio.reports import ledger
 
     bank_scope = scope(db, obs.account_id)
     check_date(db, bank_scope.entity_id, obs.date)
@@ -2558,16 +2655,10 @@ def post_existing_pool(db, posting, obs, review, state, actor):
             "correction_timing",
             "Existing later corrections require dated split correction",
         )
-    cash = [
-        r
-        for r in ledger(db, obs.date, event_ids=state["event_ids"])
-        if r["role"] == "bank"
-    ]
-    ids = {r["line_id"] for r in cash}
-    if len(ids) != 1 or any(r["account_id"] != obs.account_id for r in cash):
-        fail("cash_lineage", "This workflow requires one original physical bank line")
-    if sum(r["debit_cents"] - r["credit_cents"] for r in cash) != obs.amount_cents:
-        fail("cash_lineage", "Original bank movement does not match observation")
+    from app.portfolio.cash_lineage import normalized_cash
+
+    cash, physical = normalized_cash(db, obs, state)
+    ids = {r["line_id"] for r in physical}
     wanted = []
     journals = []
     for journal in posting.journals:
@@ -2608,7 +2699,10 @@ def post_existing_pool(db, posting, obs, review, state, actor):
                     key == "fund_id"
                     and residual.get(key) is None
                     and row.get(key) is not None
-                    and get(db, m.Fund, row[key]).purpose == "unresolved"
+                    and (
+                        get(db, m.Fund, row[key]).purpose == "unresolved"
+                        or len(cash) == 1
+                    )
                 ):
                     continue
                 return False
@@ -2649,35 +2743,89 @@ def post_existing_pool(db, posting, obs, review, state, actor):
             "corrects_id": obs.event_id,
         }
     )
+    affected_scopes = []
+    for fund_id in {x.fund_id for x in delta}:
+        change = sum(
+            x.debit_cents - x.credit_cents for x in delta if x.fund_id == fund_id
+        )
+        before = balance(db, obs.account_id, obs.date, fund_id)
+        affected_scopes.append(
+            {
+                "account_id": obs.account_id,
+                "fund_id": fund_id,
+                "date": obs.date.isoformat(),
+                "before_cents": before,
+                "delta_cents": change,
+                "after_cents": before + change,
+                "source_observation_id": obs.id,
+                "source_event_ids": state["event_ids"],
+            }
+        )
+    custody_baselines = {}
+    for fund_id in {r.get("fund_id") for r in cash} - {None}:
+        selected = sum(
+            r["debit_cents"] - r["credit_cents"]
+            for r in cash
+            if r.get("fund_id") == fund_id
+        )
+        movement = sum(
+            x.debit_cents - x.credit_cents for x in delta if x.fund_id == fund_id
+        )
+        controls = db.query(m.AccountScope).filter(
+            m.AccountScope.entity_id == bank_scope.entity_id,
+            m.AccountScope.role.in_(["bank", "bridge", "custody_liability"]),
+        )
+        baseline = sum(balance(db, a.account_id, obs.date, fund_id) for a in controls)
+        # Legacy bank attribution can precede its suspense-to-custody offset.
+        # Permit only an exact repair of that selected, unchanged cash scope.
+        if movement == 0 and baseline == selected and baseline:
+            custody_baselines[fund_id] = baseline
     result = post(
         db,
         posting,
         actor,
         allocation_journals=[s.Journal(entity_id=bank_scope.entity_id, lines=delta)],
+        correction_custody_baselines=custody_baselines,
     )
-    line_id = next(iter(ids))
-    prior = (
-        db.query(m.LineAllocation)
-        .filter_by(line_id=line_id)
-        .order_by(m.LineAllocation.date.desc(), m.LineAllocation.id.desc())
-        .first()
-    )
-    db.add(
-        m.LineAllocation(
-            line_id=line_id,
-            event_id=result["event_id"],
-            date=obs.date,
-            components=[
-                {
-                    "amount_cents": x.debit_cents - x.credit_cents,
-                    **x.model_dump(include=set(DIMENSIONS)),
-                }
-                for x in wanted
-            ],
-            evidence=posting.rationale,
-            supersedes_id=prior.id if prior else None,
+    # The original bank line carries the net replacement. Proven zero-net
+    # legacy lines receive identical dimensions, preserving every gross amount.
+    anchor = next(r for r in physical if r["event_id"] == obs.event_id)
+    line_id = anchor["line_id"]
+    for physical_row in physical:
+        ident = physical_row["line_id"]
+        replacement = (
+            wanted
+            if ident == line_id
+            else [
+                line(
+                    obs.account_id,
+                    physical_row["debit_cents"] - physical_row["credit_cents"],
+                    **wanted[0].model_dump(include=set(DIMENSIONS)),
+                )
+            ]
         )
-    )
+        prior = (
+            db.query(m.LineAllocation)
+            .filter_by(line_id=ident)
+            .order_by(m.LineAllocation.date.desc(), m.LineAllocation.id.desc())
+            .first()
+        )
+        db.add(
+            m.LineAllocation(
+                line_id=ident,
+                event_id=result["event_id"],
+                date=obs.date,
+                components=[
+                    {
+                        "amount_cents": x.debit_cents - x.credit_cents,
+                        **x.model_dump(include=set(DIMENSIONS)),
+                    }
+                    for x in replacement
+                ],
+                evidence=posting.rationale,
+                supersedes_id=prior.id if prior else None,
+            )
+        )
     db.flush()
     from app.portfolio.observation_state import observation_state
 
@@ -2697,6 +2845,11 @@ def post_existing_pool(db, posting, obs, review, state, actor):
         "remaining_cents": remaining - applied,
         "bank_cash_delta_cents": 0,
         "allocation_line_id": line_id,
+        "physical_bank_line_ids": sorted(ids),
+        "affected_fund_scopes": affected_scopes,
+        "classification_before": state["suspense_residuals"],
+        "classification_after": final_state["suspense_residuals"],
+        "partially_resolved_review_ids": [review.id] if partial else [],
     }
 
 
@@ -2774,7 +2927,7 @@ def correct_posted_pool_split(db, data, actor):
             description=obs.description,
             amount_cents=component.amount_cents,
         )
-        posting, advance = build_pool_posting(db, component, piece)
+        posting, advance = build_pool_posting(db, component, piece, state)
         advances += advance
         for journal in posting.journals:
             journals[journal.entity_id].extend(journal.lines)
@@ -3196,6 +3349,49 @@ def correct_posted_party_balance(db, data, actor):
                     "client_financing",
                     "A personal loan cannot consume client or restricted funds",
                 )
+    funding_delta = []
+    funding_rows = []
+    if bool(data.source_own_fund_id) != bool(data.lender_source_evidence):
+        fail(
+            "funding_evidence",
+            "Provide both the own-company fund and explicit lender/source evidence",
+        )
+    if data.source_own_fund_id:
+        if data.date != obs.date or any(
+            get(db, m.Event, i).date > obs.date for i in state["event_ids"]
+        ):
+            fail(
+                "correction_timing",
+                "Cash-origin allocation requires the original date without later corrections",
+            )
+        own = get(db, m.Fund, data.source_own_fund_id)
+        if (
+            data.kind != "party_payable"
+            or obs.amount_cents <= 0
+            or own.holder_entity_id != bank.entity_id
+            or get(db, m.Party, own.beneficiary_id).entity_id != bank.entity_id
+            or own.purpose == "unresolved"
+            or own.restriction != "unrestricted"
+        ):
+            fail(
+                "funding_scope",
+                "Only an evidenced incoming company loan may establish this unrestricted own-company cash origin",
+            )
+        from app.portfolio.cash_lineage import normalized_cash
+
+        normalized, physical = normalized_cash(db, obs, state)
+        if len(physical) != 1:
+            fail(
+                "cash_lineage",
+                "Incoming-loan funding requires a single original bank line",
+            )
+        for row in normalized:
+            dims = {k: row.get(k) for k in DIMENSIONS}
+            amount = row["debit_cents"] - row["credit_cents"]
+            funding_delta.append(line(obs.account_id, -amount, **dims))
+            dims.update(fund_id=own.id, cash_flow="financing")
+            funding_rows.append(line(obs.account_id, amount, **dims))
+        funding_delta += funding_rows
     role = "receivable" if data.kind == "party_receivable" else "payable"
     account_id = control(db, bank.entity_id, role)
     result = post(
@@ -3210,6 +3406,8 @@ def correct_posted_party_balance(db, data, actor):
                 "observation_id": obs.id,
                 "party_id": party.id,
                 "party_balance_kind": data.kind,
+                "source_own_fund_id": data.source_own_fund_id,
+                "lender_source_evidence": data.lender_source_evidence,
             },
             journals=[
                 s.Journal(
@@ -3234,7 +3432,35 @@ def correct_posted_party_balance(db, data, actor):
             ],
         ),
         actor,
+        allocation_journals=[s.Journal(entity_id=bank.entity_id, lines=funding_delta)]
+        if funding_delta
+        else [],
     )
+    if funding_rows:
+        ident = physical[0]["line_id"]
+        prior = (
+            db.query(m.LineAllocation)
+            .filter_by(line_id=ident)
+            .order_by(m.LineAllocation.date.desc(), m.LineAllocation.id.desc())
+            .first()
+        )
+        db.add(
+            m.LineAllocation(
+                line_id=ident,
+                event_id=result["event_id"],
+                date=data.date,
+                components=[
+                    {
+                        "amount_cents": r.debit_cents - r.credit_cents,
+                        **r.model_dump(include=set(DIMENSIONS)),
+                    }
+                    for r in funding_rows
+                ],
+                evidence=data.lender_source_evidence,
+                supersedes_id=prior.id if prior else None,
+            )
+        )
+        unknown = False
     item = m.OpenItem(
         code=data.code,
         entity_id=bank.entity_id,
@@ -3436,3 +3662,93 @@ def validate_existing_correction(db, data, actor):
 
 
 OPERATIONS["validate_existing_correction"] = validate_existing_correction
+
+
+def resolve_historical_shortage(db, data, actor):
+    from app.portfolio.assessments import resolve_historical
+
+    return resolve_historical(db, data, actor)
+
+
+OPERATIONS["resolve_historical_shortage"] = resolve_historical_shortage
+
+
+def resolve_loan_funding_source(db, data, actor):
+    """Record source evidence for one existing loan, not the pooled fund."""
+    from app.portfolio.observation_state import observation_state
+    from app.portfolio.cash_lineage import normalized_cash
+
+    review = get(db, m.ReviewItem, data.review_id)
+    obs = get(db, m.BankObservation, data.observation_id)
+    state = observation_state(db, obs.id)
+    if state["state_digest"] != data.expected_state_digest:
+        fail("stale_state", "Refresh the observation state before resolving its source")
+    if (
+        review.status != "open"
+        or review.code != "funding_source"
+        or review.observation_id != obs.id
+        or review.event_id != data.loan_event_id
+    ):
+        fail("review_state", "Choose this loan's open funding-source review")
+    event = get(db, m.Event, data.loan_event_id)
+    source = event.source or {}
+    if (
+        obs.amount_cents <= 0
+        or event.id not in state["event_ids"]
+        or event.kind != "posted_party_balance"
+        or source.get("party_balance_kind") != "party_payable"
+        or source.get("party_id") != data.lender_party_id
+        or source.get("observation_id") != obs.id
+        or any(state["suspense_residuals"].values())
+    ):
+        fail(
+            "loan_source",
+            "Source evidence must identify the lender of this fully classified incoming company loan",
+        )
+    cash, _ = normalized_cash(db, obs, state)
+    bank = scope(db, obs.account_id)
+    for row in cash:
+        if row.get("fund_id"):
+            fund = get(db, m.Fund, row["fund_id"])
+            if fund.purpose != "unresolved" and (
+                fund.restriction != "unrestricted"
+                or get(db, m.Party, fund.beneficiary_id).entity_id != bank.entity_id
+            ):
+                fail(
+                    "client_financing",
+                    "This loan is attributed to client or restricted funds",
+                )
+    item = (
+        db.query(m.OpenItem)
+        .filter_by(event_id=event.id, kind="party_payable")
+        .one_or_none()
+    )
+    if not item or item.amount_cents != obs.amount_cents:
+        fail(
+            "loan_source", "The original typed loan balance does not match the receipt"
+        )
+    review.status = "resolved"
+    review.resolved_event_id = event.id
+    review.resolution = json.dumps(
+        {
+            "reason": "identified_incoming_loan_source",
+            "observation_id": obs.id,
+            "lender_party_id": data.lender_party_id,
+            "loan_event_id": event.id,
+            "evidence": data.evidence,
+            "scope": "This receipt only; no certification of other unallocated cash or fund deficits",
+            "cash_attribution_unchanged": True,
+        },
+        sort_keys=True,
+    )
+    return {
+        "resolved_review_ids": [review.id],
+        "observation_id": obs.id,
+        "bank_cash_delta_cents": 0,
+        "financial_entries_added": False,
+        "cash_attribution_unchanged": True,
+        "unrelated_funding_not_certified": True,
+    }
+
+
+OPERATIONS["resolve_loan_funding_source"] = resolve_loan_funding_source

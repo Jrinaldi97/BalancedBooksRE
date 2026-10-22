@@ -543,6 +543,8 @@ CONTRACTS["correct_posted_intercompany"] = PostedIntercompanyInput
 
 
 class PostedPartyBalanceInput(Input):
+    source_own_fund_id: Id | None = None
+    lender_source_evidence: str | None = Field(default=None, min_length=1)
     observation: PostedTransferLeg
     party_id: Id
     code: str = Field(min_length=1, max_length=64)
@@ -574,3 +576,30 @@ class ValidateExistingCorrectionInput(Input):
 
 
 CONTRACTS["validate_existing_correction"] = ValidateExistingCorrectionInput
+
+
+class HistoricalShortageResolution(Input):
+    review_id: Id
+    expected_assessment_digest: str = Field(min_length=1)
+    as_of: date
+    corrective_event_id: Id
+    reason: Literal[
+        "source_allocation_corrected", "import_order_artifact", "supported_restoration"
+    ]
+    evidence: str = Field(min_length=1)
+    coverage_evidence: str = Field(min_length=1)
+
+
+CONTRACTS["resolve_historical_shortage"] = HistoricalShortageResolution
+
+
+class LoanFundingResolution(Input):
+    review_id: Id
+    observation_id: Id
+    expected_state_digest: str = Field(min_length=1)
+    loan_event_id: Id
+    lender_party_id: Id
+    evidence: str = Field(min_length=1)
+
+
+CONTRACTS["resolve_loan_funding_source"] = LoanFundingResolution

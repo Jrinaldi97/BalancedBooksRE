@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 mcp = FastMCP(
@@ -82,11 +83,15 @@ async def request(method, path, params=None, body=None):
             except ValueError:
                 result = {"detail": "Invalid local application response"}
             if response.status >= 400:
-                return {
-                    "ok": False,
-                    "status": response.status,
-                    "detail": result.get("detail", "Request refused"),
-                }
+                raise ToolError(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "status": response.status,
+                            "detail": result.get("detail", "Request refused"),
+                        }
+                    )
+                )
             return result
         finally:
             connection.close()
