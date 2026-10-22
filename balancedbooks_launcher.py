@@ -58,7 +58,7 @@ def prepare(data_dir, filename=None):
         FORCE_HTTPS="false",
         APP_HOST="127.0.0.1",
         SLOWBOOKS_DESKTOP="1",
-        APP_VERSION="0.1.0",
+        APP_VERSION="0.2.0",
     )
     from dotenv import load_dotenv
 
@@ -104,20 +104,24 @@ def ensure_local_token(path):
 
 def matching_server(port, token_path):
     """Only reuse a listener that accepts the token for these exact books."""
-    import httpx
+    import http.client
 
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
-        with httpx.Client(trust_env=False, timeout=2) as client:
-            result = client.get(
-                f"http://127.0.0.1:{port}/api/portfolio/context",
-                headers={"Authorization": "Bearer " + token_path.read_text().strip()},
-            )
-            return (
-                result.status_code == 200
-                and result.json().get("product") == "BalancedBooksRE"
-            )
-    except (httpx.HTTPError, OSError, ValueError):
+        connection.request(
+            "GET",
+            "/api/portfolio/context",
+            headers={"Authorization": "Bearer " + token_path.read_text().strip()},
+        )
+        response = connection.getresponse()
+        return (
+            response.status == 200
+            and json.loads(response.read()).get("product") == "BalancedBooksRE"
+        )
+    except (http.client.HTTPException, OSError, ValueError):
         return False
+    finally:
+        connection.close()
 
 
 def main():

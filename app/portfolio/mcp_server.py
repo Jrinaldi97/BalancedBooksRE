@@ -9,7 +9,6 @@ launch this same stdio process for ChatGPT web/mobile.
 import os
 from pathlib import Path
 from urllib.parse import urlparse
-import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
@@ -55,24 +54,46 @@ def configuration():
 
 
 async def request(method, path, params=None, body=None):
+    import asyncio
+    import http.client
+    import json
+    from urllib.parse import urlencode
+
     base, token = configuration()
-    async with httpx.AsyncClient(
-        timeout=90, trust_env=False, follow_redirects=False
-    ) as client:
-        response = await client.request(
-            method,
-            base + "/api/portfolio" + path,
-            params=params,
-            json=body,
-            headers={"Authorization": "Bearer " + token},
+    parsed = urlparse(base)
+
+    def send():
+        connection = http.client.HTTPConnection(
+            parsed.hostname, parsed.port or 80, timeout=90
         )
-    if response.status_code >= 400:
+        target = "/api/portfolio" + path
+        if params:
+            target += "?" + urlencode(params, doseq=True)
+        headers = {"Authorization": "Bearer " + token}
+        payload = None
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            payload = json.dumps(body).encode()
         try:
-            detail = response.json().get("detail", "Request refused")
-        except ValueError:
-            detail = "Request refused"
-        return {"ok": False, "status": response.status_code, "detail": detail}
-    return response.json()
+            connection.request(method, target, body=payload, headers=headers)
+            response = connection.getresponse()
+            try:
+                result = json.loads(response.read())
+            except ValueError:
+                result = {"detail": "Invalid local application response"}
+            if response.status >= 400:
+                return {
+                    "ok": False,
+                    "status": response.status,
+                    "detail": result.get("detail", "Request refused"),
+                }
+            return result
+        finally:
+            connection.close()
+
+    # configuration() rejects every non-loopback/non-HTTP destination.
+    # The HTTP-only adapter does not initialize an unused TLS runtime.
+    return await asyncio.to_thread(send)
 
 
 @mcp.tool(annotations=READ)
