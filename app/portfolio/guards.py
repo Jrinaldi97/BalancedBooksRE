@@ -73,3 +73,9 @@ def install(connection):
           WHERE id=NEW.id OR supersedes_id=NEW.supersedes_id OR replacement_id=NEW.replacement_id)
         BEGIN SELECT RAISE(ABORT,'Reviewed reconciliation history is immutable'); END"""
         )
+    from app.portfolio.operation_models import install_guards
+
+    install_guards(connection)
+    from app.portfolio.card_models import install_card_guards
+
+    install_card_guards(connection)

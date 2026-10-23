@@ -1,5 +1,8 @@
 # Local evidence-workflow release
 
+Follow-up: [0.4.0 accounting lifecycle and durable Codex operations](2026-10-23-accounting-and-runtime.md)
+closes additional D/E/G/H/M items and updates the remaining-work inventory.
+
 Portfolio release: `2026.10-evidence-workflows.1`. Local Mac app: `0.3.0`, build
 `20261022.3`. Upstream base remains `2.22.3`; schema advances from `bb0002` to
 `bb0003` with one additive reconciliation-revision table. No financial backfill

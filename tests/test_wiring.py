@@ -268,6 +268,14 @@ _INTENTIONAL_BACKEND_ONLY: set[tuple[str, str]] = {
     ("GET", "/api/portfolio/observation-states"),
     ("GET", "/api/portfolio/proposals/{ident}"),
     ("GET", "/api/portfolio/requests"),
+    # These have native MCP callers, verified by test_portfolio_mcp_filters.
+    ("POST", "/api/portfolio/operations"),
+    ("GET", "/api/portfolio/operations"),
+    ("POST", "/api/portfolio/operations/resume"),
+    ("POST", "/api/portfolio/operations/cancel"),
+    ("GET", "/api/portfolio/owner-custody-state/{item_id}"),
+    ("GET", "/api/portfolio/storage-diagnostics"),
+    ("GET", "/api/portfolio/cards/{card_id}/state"),
     # Compatibility alias for existing exact-key recovery clients.
     ("GET", "/api/portfolio/requests/{key:path}"),
     ("GET", "/api/portfolio/reconciliations/{ident}/revision-state"),

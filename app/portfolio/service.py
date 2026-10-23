@@ -633,16 +633,31 @@ def import_bank(db, data, actor):
             ]
         )
         occurrences[fingerprint] += 1
+        legacy_key = f"{data.source_sha256}:{number}"
         key = (
             "id:" + row.external_id
             if row.external_id
-            else f"{data.source_sha256}:{number}"
+            else (
+                f"{data.source_sha256}:sheet:{digest(row.source_sheet)}:{number}"
+                if row.source_sheet is not None
+                else legacy_key
+            )
         )
         old = (
             db.query(m.BankObservation)
             .filter_by(account_id=data.account_id, source_key=key)
             .first()
         )
+        if old is None and not row.external_id and row.source_sheet is not None:
+            # Before sheet-scoped identities, XLSX rows used SHA:index. Reuse
+            # those immutable rows only for the same original selected sheet.
+            legacy = (
+                db.query(m.BankObservation)
+                .filter_by(account_id=data.account_id, source_key=legacy_key)
+                .first()
+            )
+            if legacy is not None and legacy.source.get("sheet") == row.source_sheet:
+                old = legacy
         if old:
             if old.fingerprint != fingerprint:
                 fail(
@@ -1619,6 +1634,9 @@ def execute(db, command, actor="codex"):
     if command.operation not in s.CONTRACTS:
         fail("unsupported_operation", "Unknown portfolio operation")
     request_hash = digest(command.model_dump(mode="json", exclude={"key"}))
+    from app.portfolio.operations import guard_reserved_request, mark_committed
+
+    guard_reserved_request(db, command, request_hash)
     old = db.get(m.RequestRecord, command.key)
     if old:
         if old.digest != request_hash:
@@ -1651,8 +1669,9 @@ def execute(db, command, actor="codex"):
         finally:
             db.info.pop("portfolio_command_key", None)
             db.info.pop("portfolio_event_ordinal", None)
-        for entity in db.query(m.Entity).all():
-            entity.revision += 1
+        if command.operation != "record_operation_verification":
+            for entity in db.query(m.Entity).all():
+                entity.revision += 1
         result = {
             "committed": True,
             "operation": command.operation,
@@ -1668,6 +1687,7 @@ def execute(db, command, actor="codex"):
                 actor=actor,
             )
         )
+        mark_committed(db, command.key)
         db.flush()
     return result
 
@@ -3599,3 +3619,33 @@ def revise_reconciliation(db, data, actor):
 
 
 OPERATIONS["revise_reconciliation"] = revise_reconciliation
+
+
+def record_operation_verification(db, data, actor):
+    from app.portfolio.operations import record_verification
+
+    return record_verification(db, data, actor)
+
+
+OPERATIONS["record_operation_verification"] = record_operation_verification
+
+
+def correct_posted_owner_distribution_to_holder(db, data, actor):
+    from app.portfolio.owner_distributions import correct_distribution
+
+    return correct_distribution(db, data, actor)
+
+
+def correct_posted_owner_custody_payout(db, data, actor):
+    from app.portfolio.owner_distributions import correct_payout
+
+    return correct_payout(db, data, actor)
+
+
+OPERATIONS["correct_posted_owner_distribution_to_holder"] = (
+    correct_posted_owner_distribution_to_holder
+)
+OPERATIONS["correct_posted_owner_custody_payout"] = correct_posted_owner_custody_payout
+from app.portfolio.card_workflows import CARD_OPERATIONS  # noqa: E402
+
+OPERATIONS.update(CARD_OPERATIONS)

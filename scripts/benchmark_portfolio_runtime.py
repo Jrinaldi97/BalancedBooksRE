@@ -24,17 +24,21 @@ from sqlalchemy import create_engine, event  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 from app.database import Base  # noqa: E402
 from app.models.transactions import TransactionLine  # noqa: E402
-from app.portfolio import models as m, routes  # noqa: E402
+from app.portfolio import models as m  # noqa: E402
 from app.portfolio.service import digest  # noqa: E402
+from app.portfolio.observation_state import observation_states  # noqa: E402
+from app.portfolio.runtime import project_state  # noqa: E402
+from tests.reference_portfolio_readers import baseline_observation_state  # noqa: E402
 from tests.test_portfolio_runtime import synthetic_observations  # noqa: E402
 
 
-def measure(db, work, repeats):
+def measure(db, work, repeats, *, evict=True):
     samples = []
     result = None
     for iteration in range(repeats):
         # Evict ORM identities only; this is not an OS page-cache reset.
-        db.expunge_all()
+        if evict:
+            db.expunge_all()
         queries = []
         starts = []
 
@@ -88,7 +92,7 @@ def main():
     ):
         parser.error("At least 200 observations, 2 repeats and 1 override required")
     output = {
-        "scope": "Fresh synthetic SQLite; ORM-cold repeated samples; serialization included; no network or production timing claims",
+        "scope": "Fresh synthetic SQLite; both ORM-evicted and warm repeated samples, with OS page cache uncontrolled; serialization included; no network, writer-lock or production timing claims",
         "parameters": vars(args),
         "scoped_overrides": {},
         "observation_states": {},
@@ -148,18 +152,45 @@ def main():
                 "scoped_rows_loaded": args.overrides_per_observation,
             }
             for count in (1, 30, 100, 200):
+
+                def packet(states, projection="full"):
+                    return {
+                        "projection": projection,
+                        "count": len(states),
+                        "truncated": False,
+                        "states": [
+                            project_state(state, projection) for state in states
+                        ],
+                        "snapshot_digest": digest(
+                            [
+                                {
+                                    "observation_id": state["observation"]["id"],
+                                    "state_digest": state["state_digest"],
+                                }
+                                for state in states
+                            ]
+                        ),
+                        "snapshot_scope": "One SQLite read snapshot for this response; other database engines follow their configured isolation. Digest is not a cross-request snapshot cursor.",
+                    }
+
+                before, before_metrics = measure(
+                    db,
+                    lambda: packet(
+                        [baseline_observation_state(db, ident) for ident in ids[:count]]
+                    ),
+                    args.repeats,
+                )
                 full, full_metrics = measure(
                     db,
-                    lambda: routes.observation_states(ids[:count], db=db),
+                    lambda: packet(observation_states(db, ids[:count])),
                     args.repeats,
                 )
                 compact, compact_metrics = measure(
                     db,
-                    lambda: routes.observation_states(
-                        ids[:count], projection="compact", db=db
-                    ),
+                    lambda: packet(observation_states(db, ids[:count]), "compact"),
                     args.repeats,
                 )
+                assert before == full
                 assert full["snapshot_digest"] == compact["snapshot_digest"]
                 for left, right in zip(full["states"], compact["states"]):
                     for field in (
@@ -170,10 +201,37 @@ def main():
                         "cash_lineage",
                     ):
                         assert left[field] == right[field]
+                warm_before, warm_before_metrics = measure(
+                    db,
+                    lambda: packet(
+                        [baseline_observation_state(db, ident) for ident in ids[:count]]
+                    ),
+                    args.repeats,
+                    evict=False,
+                )
+                warm_full, warm_full_metrics = measure(
+                    db,
+                    lambda: packet(observation_states(db, ids[:count])),
+                    args.repeats,
+                    evict=False,
+                )
+                warm_compact, warm_compact_metrics = measure(
+                    db,
+                    lambda: packet(observation_states(db, ids[:count]), "compact"),
+                    args.repeats,
+                    evict=False,
+                )
+                assert warm_before == warm_full == full
+                assert warm_compact == compact
                 output["observation_states"][str(count)] = {
-                    "full": full_metrics,
-                    "compact": compact_metrics,
-                    "financial_and_digest_parity": True,
+                    "frozen_baseline_full": before_metrics,
+                    "shared_full": full_metrics,
+                    "shared_compact": compact_metrics,
+                    "warm_frozen_baseline_full": warm_before_metrics,
+                    "warm_shared_full": warm_full_metrics,
+                    "warm_shared_compact": warm_compact_metrics,
+                    "all_output_fields_and_digest_parity": True,
+                    "output_digest": digest(full),
                 }
         engine.dispose()
     print(json.dumps(output, indent=2))

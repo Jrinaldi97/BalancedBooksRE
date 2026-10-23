@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from app.models.accounts import Account
-from app.models.transactions import Transaction, TransactionLine
+from app.models.transactions import TransactionLine
 from app.portfolio import models as m
 from app.portfolio.service import cents, values, get, fail
 
@@ -27,142 +27,17 @@ def ledger(
     basis="accrual",
     event_ids=None,
 ):
-    query = (
-        db.query(
-            TransactionLine,
-            Transaction,
-            m.JournalScope,
-            m.LineScope,
-            m.AccountScope,
-            Account,
-        )
-        .join(Transaction, Transaction.id == TransactionLine.transaction_id)
-        .join(m.JournalScope, m.JournalScope.transaction_id == Transaction.id)
-        .join(m.LineScope, m.LineScope.line_id == TransactionLine.id)
-        .join(m.AccountScope, m.AccountScope.account_id == TransactionLine.account_id)
-        .join(Account, Account.id == TransactionLine.account_id)
-        .filter(Transaction.date <= end)
-    )
-    if event_ids is not None:
-        query = query.filter(m.JournalScope.event_id.in_(event_ids))
-    if entity_ids:
-        query = query.filter(m.JournalScope.entity_id.in_(entity_ids))
-    if account_id:
-        query = query.filter(Account.id == account_id)
-    # Keep date ordering identical while restricting override reads to this
-    # ledger's actual line scope. The subquery avoids SQLite parameter limits
-    # and includes pre-allocation lines before property filtering.
-    scoped_line_ids = query.with_entities(TransactionLine.id)
-    overrides = {
-        x.line_id: x
-        for x in db.query(m.CashClassification)
-        .filter(
-            m.CashClassification.date <= end,
-            m.CashClassification.line_id.in_(scoped_line_ids),
-        )
-        .order_by(m.CashClassification.date, m.CashClassification.id)
-    }
-    rows = []
-    for ln, txn, js, dim, sc, acct in query.order_by(
-        Transaction.date, Transaction.id, TransactionLine.id
-    ):
-        rows.append(
-            {
-                "line_id": ln.id,
-                "classification_event_id": (
-                    overrides[ln.id].event_id if ln.id in overrides else js.event_id
-                ),
-                "event_id": js.event_id,
-                "entity_id": js.entity_id,
-                "date": txn.date.isoformat(),
-                "account_id": acct.id,
-                "name": acct.name,
-                "type": acct.account_type.value,
-                "role": sc.role,
-                "cash_flow": (
-                    overrides[ln.id].cash_flow if ln.id in overrides else dim.cash_flow
-                ),
-                "debit_cents": cents(ln.debit),
-                "credit_cents": cents(ln.credit),
-                "unit_id": dim.unit_id,
-                "property_id": dim.property_id,
-                "fund_id": dim.fund_id,
-                "counterparty_id": dim.counterparty_id,
-                "item": dim.item,
-                "opening": txn.source_type == "re_opening",
-                "virtual": False,
-            }
-        )
-    from app.portfolio.allocations import effective_map
+    from app.portfolio.ledger_snapshot import LedgerSnapshot
 
-    replacements = effective_map(db, end, [row["line_id"] for row in rows])
-    effective_rows = []
-    for row in rows:
-        replacement = replacements.get(row["line_id"])
-        if replacement:
-            for component in replacement.components:
-                amount = component["amount_cents"]
-                classification = overrides.get(row["line_id"])
-                later_classification = classification and (
-                    classification.date,
-                    classification.event_id,
-                ) > (replacement.date, replacement.event_id)
-                effective_rows.append(
-                    {
-                        **row,
-                        **{k: v for k, v in component.items() if k != "amount_cents"},
-                        "debit_cents": max(amount, 0),
-                        "credit_cents": max(-amount, 0),
-                        "allocation_event_id": replacement.event_id,
-                        "cash_flow": (
-                            classification.cash_flow
-                            if later_classification
-                            else component.get("cash_flow")
-                        ),
-                        "classification_event_id": (
-                            classification.event_id
-                            if later_classification
-                            else replacement.event_id
-                        ),
-                    }
-                )
-        else:
-            effective_rows.append(row)
-    rows = [
-        row
-        for row in effective_rows
-        if property_id is None or row.get("property_id") == property_id
-    ]
-    if basis == "modified_cash_bank_posting":
-        query = db.query(m.BasisAdjustment).filter(m.BasisAdjustment.date <= end)
-        if event_ids is not None:
-            query = query.filter(m.BasisAdjustment.event_id.in_(event_ids))
-        if entity_ids:
-            query = query.filter(m.BasisAdjustment.entity_id.in_(entity_ids))
-        for adjustment in query:
-            for ln in adjustment.lines:
-                if property_id and ln.get("property_id") != property_id:
-                    continue
-                if account_id and ln["account_id"] != account_id:
-                    continue
-                acct = get(db, Account, ln["account_id"])
-                sc = get(db, m.AccountScope, acct.id)
-                rows.append(
-                    {
-                        **ln,
-                        "line_id": None,
-                        "event_id": adjustment.event_id,
-                        "entity_id": adjustment.entity_id,
-                        "date": adjustment.date.isoformat(),
-                        "name": acct.name,
-                        "type": acct.account_type.value,
-                        "role": sc.role,
-                        "opening": False,
-                        "virtual": True,
-                        "reason": adjustment.reason,
-                    }
-                )
-    return rows
+    snapshot = LedgerSnapshot(
+        db,
+        end,
+        entity_ids=entity_ids,
+        account_id=account_id,
+        event_ids=event_ids,
+        adjustments=basis == "modified_cash_bank_posting",
+    )
+    return snapshot.project(end, property_id=property_id, basis=basis)
 
 
 def statements(

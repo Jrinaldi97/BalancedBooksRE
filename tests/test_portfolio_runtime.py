@@ -87,21 +87,18 @@ def test_batch_snapshot_survives_concurrent_writer(tmp_path, monkeypatch):
         writer.commit()
     import app.portfolio.observation_state as state_module
 
-    original_reader = state_module.observation_state
-    calls = []
+    original_reader = state_module.LedgerSnapshot
 
-    def concurrent_read(db, ident, through=None):
-        result = original_reader(db, ident, through)
-        calls.append(ident)
-        if len(calls) == 1:
-            with factory() as writer:
-                writer.get(m.ReviewItem, review_id).detail = (
-                    "Changed outside the read snapshot"
-                )
-                writer.commit()
+    def concurrent_read(db, *args, **kwargs):
+        result = original_reader(db, *args, **kwargs)
+        with factory() as writer:
+            writer.get(m.ReviewItem, review_id).detail = (
+                "Changed outside the read snapshot"
+            )
+            writer.commit()
         return result
 
-    monkeypatch.setattr(state_module, "observation_state", concurrent_read)
+    monkeypatch.setattr(state_module, "LedgerSnapshot", concurrent_read)
     with factory() as reader:
         result = routes.observation_states(ids=ids, db=reader)
         assert (

@@ -6,7 +6,8 @@ from sqlalchemy import or_, exists, select, func
 from app.portfolio import models as m
 from app.portfolio.allocations import DIMENSIONS
 from app.portfolio.service import get, values, digest
-from app.portfolio.reports import ledger, read_snapshot
+from app.portfolio.reports import read_snapshot
+from app.portfolio.ledger_snapshot import LedgerSnapshot
 
 SOURCE_MOVEMENT_KINDS = {
     "bank": "bank_cash",
@@ -16,31 +17,56 @@ SOURCE_MOVEMENT_KINDS = {
 
 
 def observation_state(db, observation_id, through=None):
+    return observation_states(db, [observation_id], through)[0]
+
+
+def observation_states(db, observation_ids, through=None):
+    """Exact per-observation packets sharing one ephemeral database read snapshot."""
+    from app.portfolio.service import fail
+
+    if (
+        not 1 <= len(observation_ids) <= 200
+        or len(set(observation_ids)) != len(observation_ids)
+        or any(type(i) is not int or i <= 0 for i in observation_ids)
+    ):
+        fail("observation_ids", "Choose 1 to 200 unique positive observation IDs")
     read_snapshot(db)
-    obs = get(db, m.BankObservation, observation_id)
     through = through or date.max
-    # Only explicit observation references or corrects_id links establish
-    # lineage. Similar amounts/descriptions do not establish relationships.
+    observations = {
+        obs.id: obs
+        for obs in db.query(m.BankObservation).filter(
+            m.BankObservation.id.in_(observation_ids)
+        )
+    }
+    for ident in observation_ids:
+        if ident not in observations:
+            get(db, m.BankObservation, ident)
     linked_ids = func.json_each(m.Event.source, "$.observation_ids").table_valued(
         "value"
     )
     linked = exists(
-        select(1).select_from(linked_ids).where(linked_ids.c.value == obs.id)
+        select(1)
+        .select_from(linked_ids)
+        .where(linked_ids.c.value == m.BankObservation.id)
     )
     roots = (
-        db.query(m.Event)
-        .filter(
+        db.query(m.BankObservation.id, m.Event)
+        .join(
+            m.Event,
             or_(
-                m.Event.id == obs.event_id,
-                m.Event.source["observation_id"].as_integer() == obs.id,
+                m.Event.id == m.BankObservation.event_id,
+                m.Event.source["observation_id"].as_integer() == m.BankObservation.id,
                 linked,
-            )
+            ),
         )
+        .filter(m.BankObservation.id.in_(observation_ids))
         .all()
     )
-    # A coordinated correction is assessed with all explicitly linked original
-    # legs, so its paired clearing lines are never mistaken for new suspense.
-    events = {event.id: event for event in roots}
+    per_observation = defaultdict(set)
+    events = {}
+    for ident, event in roots:
+        per_observation[ident].add(event.id)
+        events[event.id] = event
     frontier = set(events)
     while frontier:
         source_ids = {
@@ -56,14 +82,94 @@ def observation_state(db, observation_id, through=None):
         )
         frontier = {event.id for event in children} - events.keys()
         events.update({event.id: event for event in children})
-    active = sorted(event.id for event in events.values() if event.date <= through)
+    edges = defaultdict(set)
+    for event in events.values():
+        if event.corrects_id in events:
+            edges[event.corrects_id].add(event.id)
+        edges[event.id].update(
+            ident
+            for ident in (event.source or {}).get("source_event_ids", [])
+            if type(ident) is int and ident in events
+        )
+    for identifiers in per_observation.values():
+        frontier = set(identifiers)
+        while frontier:
+            frontier = set().union(*(edges[ident] for ident in frontier)) - identifiers
+            identifiers.update(frontier)
+    active_union = {
+        ident
+        for identifiers in per_observation.values()
+        for ident in identifiers
+        if events[ident].date <= through
+    }
+    # Cash lineage uses the immutable observation date even when the state is
+    # inspected later. Preserve complete effective revision history for both.
+    max_cutoff = max([through, *(obs.date for obs in observations.values())])
+    ledger_input = LedgerSnapshot(db, max_cutoff, event_ids=active_union)
+    reviews = defaultdict(list)
+    for review in (
+        db.query(m.ReviewItem)
+        .filter(m.ReviewItem.observation_id.in_(observation_ids))
+        .order_by(m.ReviewItem.id)
+    ):
+        reviews[review.observation_id].append(values(review))
+    sources = list(
+        db.query(m.BankObservation, m.AccountScope)
+        .join(m.AccountScope, m.AccountScope.account_id == m.BankObservation.account_id)
+        .filter(m.BankObservation.event_id.in_(active_union))
+        .order_by(m.BankObservation.id)
+    )
+    entities = {
+        scope.account_id: scope.entity_id
+        for scope in db.query(m.AccountScope).filter(
+            m.AccountScope.account_id.in_(
+                {obs.account_id for obs in observations.values()}
+            )
+        )
+    }
+    result = []
+    for ident in observation_ids:
+        obs = observations[ident]
+        active = sorted(i for i in per_observation[ident] if events[i].date <= through)
+        rows_by_basis = ledger_input.project_bases(through, event_ids=active)
+        result.append(
+            _assemble_state(
+                db,
+                obs,
+                through,
+                active,
+                events,
+                rows_by_basis,
+                reviews[ident],
+                [
+                    (original, account)
+                    for original, account in sources
+                    if original.event_id in active
+                ],
+                ledger_input.project(obs.date, event_ids=active),
+                entities.get(obs.account_id),
+            )
+        )
+    return result
+
+
+def _assemble_state(
+    db,
+    obs,
+    through,
+    active,
+    events,
+    rows_by_basis,
+    reviews,
+    source_observations,
+    cash_rows,
+    entity_id,
+):
     residuals = {}
     cash = defaultdict(int)
     movements = defaultdict(int)
-    rows_by_basis = {}
     for basis in ("accrual", "modified_cash_bank_posting"):
         totals = defaultdict(int)
-        rows_by_basis[basis] = ledger(db, through, basis=basis, event_ids=active)
         for row in rows_by_basis[basis]:
             amount = row["debit_cents"] - row["credit_cents"]
             if row["role"].startswith("suspense"):
@@ -94,12 +200,6 @@ def observation_state(db, observation_id, through=None):
             for key, amount in sorted(totals.items(), key=lambda pair: repr(pair[0]))
             if amount
         ]
-    reviews = [
-        values(r)
-        for r in db.query(m.ReviewItem)
-        .filter_by(observation_id=obs.id)
-        .order_by(m.ReviewItem.id)
-    ]
     state = {
         "observation": values(obs),
         "as_of": through.isoformat(),
@@ -121,13 +221,7 @@ def observation_state(db, observation_id, through=None):
                 "date": original.date.isoformat(),
                 "amount_cents": original.amount_cents,
             }
-            for original, account in db.query(m.BankObservation, m.AccountScope)
-            .join(
-                m.AccountScope,
-                m.AccountScope.account_id == m.BankObservation.account_id,
-            )
-            .filter(m.BankObservation.event_id.in_(active))
-            .order_by(m.BankObservation.id)
+            for original, account in source_observations
             if account.role in SOURCE_MOVEMENT_KINDS
         ],
         "source_movements": [
@@ -152,7 +246,14 @@ def observation_state(db, observation_id, through=None):
 
     if obs.event_id:
         try:
-            normalized, physical = normalized_cash(db, obs, state)
+            normalized, physical = normalized_cash(
+                db,
+                obs,
+                state,
+                rows=cash_rows,
+                events={ident: events[ident] for ident in active},
+                entity_id=entity_id,
+            )
             state["cash_lineage"] = {
                 "supported": True,
                 "physical_line_ids": sorted(r["line_id"] for r in physical),

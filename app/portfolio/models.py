@@ -382,3 +382,18 @@ class LineAllocation(Base):
     components = Column(JSON, nullable=False)
     evidence = Column(Text, nullable=False)
     supersedes_id = Column(Integer, ForeignKey("re_line_allocations.id"))
+
+
+from app.portfolio.operation_models import (  # noqa: E402,F401
+    AgentOperation,
+    OperationTransition,
+    OperationVerification,
+)
+
+
+from app.portfolio.card_models import (  # noqa: E402
+    CardIdentity as CardIdentity,
+    CardAlias as CardAlias,
+    CardCoverage as CardCoverage,
+    CardActivity as CardActivity,
+)

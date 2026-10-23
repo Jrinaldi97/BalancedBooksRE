@@ -1,0 +1,1098 @@
+{
+  "scope": "Fresh synthetic SQLite; both ORM-evicted and warm repeated samples, with OS page cache uncontrolled; serialization included; no network, writer-lock or production timing claims",
+  "parameters": {
+    "observations": 300,
+    "overrides_per_observation": 20,
+    "repeats": 5
+  },
+  "scoped_overrides": {
+    "baseline_all_rows": {
+      "samples": [
+        {
+          "elapsed_ms": 44.228,
+          "sql_ms": 0.987,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 11567655
+        },
+        {
+          "elapsed_ms": 76.206,
+          "sql_ms": 1.244,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 11636459
+        },
+        {
+          "elapsed_ms": 78.217,
+          "sql_ms": 1.154,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 11232747
+        },
+        {
+          "elapsed_ms": 42.587,
+          "sql_ms": 1.121,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 11399723
+        },
+        {
+          "elapsed_ms": 42.593,
+          "sql_ms": 1.287,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 11400459
+        }
+      ],
+      "p50_elapsed_ms": 44.228,
+      "p95_elapsed_ms": 78.217
+    },
+    "scoped_rows": {
+      "samples": [
+        {
+          "elapsed_ms": 1.033,
+          "sql_ms": 0.067,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 62130
+        },
+        {
+          "elapsed_ms": 0.401,
+          "sql_ms": 0.015,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 43141
+        },
+        {
+          "elapsed_ms": 0.363,
+          "sql_ms": 0.013,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 41789
+        },
+        {
+          "elapsed_ms": 0.35,
+          "sql_ms": 0.013,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 41789
+        },
+        {
+          "elapsed_ms": 0.346,
+          "sql_ms": 0.012,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 41789
+        }
+      ],
+      "p50_elapsed_ms": 0.363,
+      "p95_elapsed_ms": 1.033
+    },
+    "output_digest": "3104c9d60174b588263f75cca122a1d9cd776c14131e70cd7574db5c8eca3ecf",
+    "equivalent": true,
+    "baseline_rows": 6000,
+    "scoped_rows_loaded": 20
+  },
+  "observation_states": {
+    "1": {
+      "frozen_baseline_full": {
+        "samples": [
+          {
+            "elapsed_ms": 19.621,
+            "sql_ms": 0.476,
+            "queries": 18,
+            "json_bytes": 2983,
+            "peak_python_bytes": 604837
+          },
+          {
+            "elapsed_ms": 7.585,
+            "sql_ms": 0.176,
+            "queries": 17,
+            "json_bytes": 2983,
+            "peak_python_bytes": 107050
+          },
+          {
+            "elapsed_ms": 7.265,
+            "sql_ms": 0.168,
+            "queries": 17,
+            "json_bytes": 2983,
+            "peak_python_bytes": 93748
+          },
+          {
+            "elapsed_ms": 7.367,
+            "sql_ms": 0.175,
+            "queries": 17,
+            "json_bytes": 2983,
+            "peak_python_bytes": 106394
+          },
+          {
+            "elapsed_ms": 7.142,
+            "sql_ms": 0.162,
+            "queries": 17,
+            "json_bytes": 2983,
+            "peak_python_bytes": 106338
+          }
+        ],
+        "p50_elapsed_ms": 7.367,
+        "p95_elapsed_ms": 19.621
+      },
+      "shared_full": {
+        "samples": [
+          {
+            "elapsed_ms": 8.438,
+            "sql_ms": 0.195,
+            "queries": 10,
+            "json_bytes": 2983,
+            "peak_python_bytes": 212921
+          },
+          {
+            "elapsed_ms": 4.619,
+            "sql_ms": 0.107,
+            "queries": 10,
+            "json_bytes": 2983,
+            "peak_python_bytes": 87157
+          },
+          {
+            "elapsed_ms": 4.484,
+            "sql_ms": 0.09,
+            "queries": 10,
+            "json_bytes": 2983,
+            "peak_python_bytes": 87007
+          },
+          {
+            "elapsed_ms": 4.408,
+            "sql_ms": 0.088,
+            "queries": 10,
+            "json_bytes": 2983,
+            "peak_python_bytes": 83421
+          },
+          {
+            "elapsed_ms": 4.521,
+            "sql_ms": 0.088,
+            "queries": 10,
+            "json_bytes": 2983,
+            "peak_python_bytes": 86959
+          }
+        ],
+        "p50_elapsed_ms": 4.521,
+        "p95_elapsed_ms": 8.438
+      },
+      "shared_compact": {
+        "samples": [
+          {
+            "elapsed_ms": 4.338,
+            "sql_ms": 0.087,
+            "queries": 10,
+            "json_bytes": 2805,
+            "peak_python_bytes": 86415
+          },
+          {
+            "elapsed_ms": 4.464,
+            "sql_ms": 0.089,
+            "queries": 10,
+            "json_bytes": 2805,
+            "peak_python_bytes": 71036
+          },
+          {
+            "elapsed_ms": 4.402,
+            "sql_ms": 0.086,
+            "queries": 10,
+            "json_bytes": 2805,
+            "peak_python_bytes": 87055
+          },
+          {
+            "elapsed_ms": 4.492,
+            "sql_ms": 0.099,
+            "queries": 10,
+            "json_bytes": 2805,
+            "peak_python_bytes": 86135
+          },
+          {
+            "elapsed_ms": 4.324,
+            "sql_ms": 0.085,
+            "queries": 10,
+            "json_bytes": 2805,
+            "peak_python_bytes": 72907
+          }
+        ],
+        "p50_elapsed_ms": 4.402,
+        "p95_elapsed_ms": 4.492
+      },
+      "warm_frozen_baseline_full": {
+        "samples": [
+          {
+            "elapsed_ms": 7.225,
+            "sql_ms": 0.164,
+            "queries": 17,
+            "json_bytes": 2983,
+            "peak_python_bytes": 106450
+          },
+          {
+            "elapsed_ms": 7.495,
+            "sql_ms": 0.195,
+            "queries": 17,
+            "json_bytes": 2983,
+            "peak_python_bytes": 98547
+          },
+          {
+            "elapsed_ms": 7.143,
+            "sql_ms": 0.162,
+            "queries": 17,
+            "json_bytes": 2983,
+            "peak_python_bytes": 105362
+          },
+          {
+            "elapsed_ms": 7.307,
+            "sql_ms": 0.161,
+            "queries": 17,
+            "json_bytes": 2983,
+            "peak_python_bytes": 98611
+          },
+          {
+            "elapsed_ms": 7.081,
+            "sql_ms": 0.16,
+            "queries": 17,
+            "json_bytes": 2983,
+            "peak_python_bytes": 107170
+          }
+        ],
+        "p50_elapsed_ms": 7.225,
+        "p95_elapsed_ms": 7.495
+      },
+      "warm_shared_full": {
+        "samples": [
+          {
+            "elapsed_ms": 4.506,
+            "sql_ms": 0.088,
+            "queries": 10,
+            "json_bytes": 2983,
+            "peak_python_bytes": 86303
+          },
+          {
+            "elapsed_ms": 4.442,
+            "sql_ms": 0.1,
+            "queries": 10,
+            "json_bytes": 2983,
+            "peak_python_bytes": 82653
+          },
+          {
+            "elapsed_ms": 4.424,
+            "sql_ms": 0.086,
+            "queries": 10,
+            "json_bytes": 2983,
+            "peak_python_bytes": 86063
+          },
+          {
+            "elapsed_ms": 4.3,
+            "sql_ms": 0.086,
+            "queries": 10,
+            "json_bytes": 2983,
+            "peak_python_bytes": 85759
+          },
+          {
+            "elapsed_ms": 4.349,
+            "sql_ms": 0.086,
+            "queries": 10,
+            "json_bytes": 2983,
+            "peak_python_bytes": 72707
+          }
+        ],
+        "p50_elapsed_ms": 4.424,
+        "p95_elapsed_ms": 4.506
+      },
+      "warm_shared_compact": {
+        "samples": [
+          {
+            "elapsed_ms": 4.57,
+            "sql_ms": 0.087,
+            "queries": 10,
+            "json_bytes": 2805,
+            "peak_python_bytes": 85879
+          },
+          {
+            "elapsed_ms": 4.437,
+            "sql_ms": 0.087,
+            "queries": 10,
+            "json_bytes": 2805,
+            "peak_python_bytes": 83021
+          },
+          {
+            "elapsed_ms": 4.476,
+            "sql_ms": 0.086,
+            "queries": 10,
+            "json_bytes": 2805,
+            "peak_python_bytes": 86407
+          },
+          {
+            "elapsed_ms": 4.399,
+            "sql_ms": 0.086,
+            "queries": 10,
+            "json_bytes": 2805,
+            "peak_python_bytes": 85663
+          },
+          {
+            "elapsed_ms": 4.427,
+            "sql_ms": 0.086,
+            "queries": 10,
+            "json_bytes": 2805,
+            "peak_python_bytes": 72627
+          }
+        ],
+        "p50_elapsed_ms": 4.437,
+        "p95_elapsed_ms": 4.57
+      },
+      "all_output_fields_and_digest_parity": true,
+      "output_digest": "862b97842e78956966f2772f00271daf22264dfb09d82643773f5ec87cbe014f"
+    },
+    "30": {
+      "frozen_baseline_full": {
+        "samples": [
+          {
+            "elapsed_ms": 271.622,
+            "sql_ms": 5.636,
+            "queries": 510,
+            "json_bytes": 80562,
+            "peak_python_bytes": 516386
+          },
+          {
+            "elapsed_ms": 233.313,
+            "sql_ms": 5.518,
+            "queries": 510,
+            "json_bytes": 80562,
+            "peak_python_bytes": 569181
+          },
+          {
+            "elapsed_ms": 232.93,
+            "sql_ms": 5.36,
+            "queries": 510,
+            "json_bytes": 80562,
+            "peak_python_bytes": 574791
+          },
+          {
+            "elapsed_ms": 233.697,
+            "sql_ms": 5.369,
+            "queries": 510,
+            "json_bytes": 80562,
+            "peak_python_bytes": 486993
+          },
+          {
+            "elapsed_ms": 232.907,
+            "sql_ms": 5.343,
+            "queries": 510,
+            "json_bytes": 80562,
+            "peak_python_bytes": 492635
+          }
+        ],
+        "p50_elapsed_ms": 233.313,
+        "p95_elapsed_ms": 271.622
+      },
+      "shared_full": {
+        "samples": [
+          {
+            "elapsed_ms": 30.379,
+            "sql_ms": 0.579,
+            "queries": 10,
+            "json_bytes": 80562,
+            "peak_python_bytes": 1276168
+          },
+          {
+            "elapsed_ms": 29.957,
+            "sql_ms": 0.272,
+            "queries": 10,
+            "json_bytes": 80562,
+            "peak_python_bytes": 1136418
+          },
+          {
+            "elapsed_ms": 29.894,
+            "sql_ms": 0.267,
+            "queries": 10,
+            "json_bytes": 80562,
+            "peak_python_bytes": 1133258
+          },
+          {
+            "elapsed_ms": 29.517,
+            "sql_ms": 0.267,
+            "queries": 10,
+            "json_bytes": 80562,
+            "peak_python_bytes": 1133242
+          },
+          {
+            "elapsed_ms": 29.679,
+            "sql_ms": 0.319,
+            "queries": 10,
+            "json_bytes": 80562,
+            "peak_python_bytes": 1139111
+          }
+        ],
+        "p50_elapsed_ms": 29.894,
+        "p95_elapsed_ms": 30.379
+      },
+      "shared_compact": {
+        "samples": [
+          {
+            "elapsed_ms": 31.471,
+            "sql_ms": 0.266,
+            "queries": 10,
+            "json_bytes": 75113,
+            "peak_python_bytes": 1140087
+          },
+          {
+            "elapsed_ms": 31.606,
+            "sql_ms": 0.283,
+            "queries": 10,
+            "json_bytes": 75113,
+            "peak_python_bytes": 1139111
+          },
+          {
+            "elapsed_ms": 31.492,
+            "sql_ms": 0.282,
+            "queries": 10,
+            "json_bytes": 75113,
+            "peak_python_bytes": 1139111
+          },
+          {
+            "elapsed_ms": 31.464,
+            "sql_ms": 0.262,
+            "queries": 10,
+            "json_bytes": 75113,
+            "peak_python_bytes": 1138047
+          },
+          {
+            "elapsed_ms": 31.582,
+            "sql_ms": 0.263,
+            "queries": 10,
+            "json_bytes": 75113,
+            "peak_python_bytes": 1133114
+          }
+        ],
+        "p50_elapsed_ms": 31.492,
+        "p95_elapsed_ms": 31.606
+      },
+      "warm_frozen_baseline_full": {
+        "samples": [
+          {
+            "elapsed_ms": 235.725,
+            "sql_ms": 5.616,
+            "queries": 510,
+            "json_bytes": 80562,
+            "peak_python_bytes": 576343
+          },
+          {
+            "elapsed_ms": 232.938,
+            "sql_ms": 5.382,
+            "queries": 510,
+            "json_bytes": 80562,
+            "peak_python_bytes": 518751
+          },
+          {
+            "elapsed_ms": 233.452,
+            "sql_ms": 5.442,
+            "queries": 510,
+            "json_bytes": 80562,
+            "peak_python_bytes": 517436
+          },
+          {
+            "elapsed_ms": 234.524,
+            "sql_ms": 5.501,
+            "queries": 510,
+            "json_bytes": 80562,
+            "peak_python_bytes": 506101
+          },
+          {
+            "elapsed_ms": 235.871,
+            "sql_ms": 5.656,
+            "queries": 510,
+            "json_bytes": 80562,
+            "peak_python_bytes": 519148
+          }
+        ],
+        "p50_elapsed_ms": 234.524,
+        "p95_elapsed_ms": 235.871
+      },
+      "warm_shared_full": {
+        "samples": [
+          {
+            "elapsed_ms": 29.754,
+            "sql_ms": 0.267,
+            "queries": 10,
+            "json_bytes": 80562,
+            "peak_python_bytes": 1130834
+          },
+          {
+            "elapsed_ms": 29.757,
+            "sql_ms": 0.266,
+            "queries": 10,
+            "json_bytes": 80562,
+            "peak_python_bytes": 1135882
+          },
+          {
+            "elapsed_ms": 29.873,
+            "sql_ms": 0.269,
+            "queries": 10,
+            "json_bytes": 80562,
+            "peak_python_bytes": 1133242
+          },
+          {
+            "elapsed_ms": 29.761,
+            "sql_ms": 0.27,
+            "queries": 10,
+            "json_bytes": 80562,
+            "peak_python_bytes": 1134266
+          },
+          {
+            "elapsed_ms": 29.832,
+            "sql_ms": 0.258,
+            "queries": 10,
+            "json_bytes": 80562,
+            "peak_python_bytes": 1133242
+          }
+        ],
+        "p50_elapsed_ms": 29.761,
+        "p95_elapsed_ms": 29.873
+      },
+      "warm_shared_compact": {
+        "samples": [
+          {
+            "elapsed_ms": 31.534,
+            "sql_ms": 0.26,
+            "queries": 10,
+            "json_bytes": 75113,
+            "peak_python_bytes": 1134362
+          },
+          {
+            "elapsed_ms": 31.573,
+            "sql_ms": 0.264,
+            "queries": 10,
+            "json_bytes": 75113,
+            "peak_python_bytes": 1139111
+          },
+          {
+            "elapsed_ms": 31.678,
+            "sql_ms": 0.26,
+            "queries": 10,
+            "json_bytes": 75113,
+            "peak_python_bytes": 1140487
+          },
+          {
+            "elapsed_ms": 31.555,
+            "sql_ms": 0.263,
+            "queries": 10,
+            "json_bytes": 75113,
+            "peak_python_bytes": 1139111
+          },
+          {
+            "elapsed_ms": 31.579,
+            "sql_ms": 0.258,
+            "queries": 10,
+            "json_bytes": 75113,
+            "peak_python_bytes": 1139111
+          }
+        ],
+        "p50_elapsed_ms": 31.573,
+        "p95_elapsed_ms": 31.678
+      },
+      "all_output_fields_and_digest_parity": true,
+      "output_digest": "7693be6f01db061864f79dcd827ee30f1bd18fa0a29c2cc34cd35b98c48229e6"
+    },
+    "100": {
+      "frozen_baseline_full": {
+        "samples": [
+          {
+            "elapsed_ms": 798.953,
+            "sql_ms": 20.155,
+            "queries": 1700,
+            "json_bytes": 268381,
+            "peak_python_bytes": 1429632
+          },
+          {
+            "elapsed_ms": 791.306,
+            "sql_ms": 19.13,
+            "queries": 1700,
+            "json_bytes": 268381,
+            "peak_python_bytes": 1439482
+          },
+          {
+            "elapsed_ms": 793.294,
+            "sql_ms": 18.945,
+            "queries": 1700,
+            "json_bytes": 268381,
+            "peak_python_bytes": 1427964
+          },
+          {
+            "elapsed_ms": 794.175,
+            "sql_ms": 19.145,
+            "queries": 1700,
+            "json_bytes": 268381,
+            "peak_python_bytes": 1395444
+          },
+          {
+            "elapsed_ms": 838.55,
+            "sql_ms": 19.988,
+            "queries": 1700,
+            "json_bytes": 268381,
+            "peak_python_bytes": 1457962
+          }
+        ],
+        "p50_elapsed_ms": 794.175,
+        "p95_elapsed_ms": 838.55
+      },
+      "shared_full": {
+        "samples": [
+          {
+            "elapsed_ms": 108.628,
+            "sql_ms": 1.047,
+            "queries": 10,
+            "json_bytes": 268381,
+            "peak_python_bytes": 4474235
+          },
+          {
+            "elapsed_ms": 104.179,
+            "sql_ms": 0.668,
+            "queries": 10,
+            "json_bytes": 268381,
+            "peak_python_bytes": 4090179
+          },
+          {
+            "elapsed_ms": 104.059,
+            "sql_ms": 0.664,
+            "queries": 10,
+            "json_bytes": 268381,
+            "peak_python_bytes": 4090307
+          },
+          {
+            "elapsed_ms": 140.473,
+            "sql_ms": 0.681,
+            "queries": 10,
+            "json_bytes": 268381,
+            "peak_python_bytes": 4090915
+          },
+          {
+            "elapsed_ms": 105.352,
+            "sql_ms": 0.803,
+            "queries": 10,
+            "json_bytes": 268381,
+            "peak_python_bytes": 4364059
+          }
+        ],
+        "p50_elapsed_ms": 105.352,
+        "p95_elapsed_ms": 140.473
+      },
+      "shared_compact": {
+        "samples": [
+          {
+            "elapsed_ms": 110.8,
+            "sql_ms": 0.666,
+            "queries": 10,
+            "json_bytes": 250190,
+            "peak_python_bytes": 4090275
+          },
+          {
+            "elapsed_ms": 110.915,
+            "sql_ms": 0.674,
+            "queries": 10,
+            "json_bytes": 250190,
+            "peak_python_bytes": 4096368
+          },
+          {
+            "elapsed_ms": 110.474,
+            "sql_ms": 0.673,
+            "queries": 10,
+            "json_bytes": 250190,
+            "peak_python_bytes": 4090307
+          },
+          {
+            "elapsed_ms": 147.515,
+            "sql_ms": 0.716,
+            "queries": 10,
+            "json_bytes": 250190,
+            "peak_python_bytes": 4279243
+          },
+          {
+            "elapsed_ms": 110.49,
+            "sql_ms": 0.667,
+            "queries": 10,
+            "json_bytes": 250190,
+            "peak_python_bytes": 4119629
+          }
+        ],
+        "p50_elapsed_ms": 110.8,
+        "p95_elapsed_ms": 147.515
+      },
+      "warm_frozen_baseline_full": {
+        "samples": [
+          {
+            "elapsed_ms": 793.832,
+            "sql_ms": 19.155,
+            "queries": 1700,
+            "json_bytes": 268381,
+            "peak_python_bytes": 1452226
+          },
+          {
+            "elapsed_ms": 793.201,
+            "sql_ms": 18.903,
+            "queries": 1700,
+            "json_bytes": 268381,
+            "peak_python_bytes": 1459738
+          },
+          {
+            "elapsed_ms": 796.2,
+            "sql_ms": 18.962,
+            "queries": 1700,
+            "json_bytes": 268381,
+            "peak_python_bytes": 1384473
+          },
+          {
+            "elapsed_ms": 813.509,
+            "sql_ms": 19.547,
+            "queries": 1700,
+            "json_bytes": 268381,
+            "peak_python_bytes": 1396137
+          },
+          {
+            "elapsed_ms": 800.465,
+            "sql_ms": 19.362,
+            "queries": 1700,
+            "json_bytes": 268381,
+            "peak_python_bytes": 1383706
+          }
+        ],
+        "p50_elapsed_ms": 796.2,
+        "p95_elapsed_ms": 813.509
+      },
+      "warm_shared_full": {
+        "samples": [
+          {
+            "elapsed_ms": 104.631,
+            "sql_ms": 0.679,
+            "queries": 10,
+            "json_bytes": 268381,
+            "peak_python_bytes": 4088571
+          },
+          {
+            "elapsed_ms": 142.634,
+            "sql_ms": 0.716,
+            "queries": 10,
+            "json_bytes": 268381,
+            "peak_python_bytes": 4225579
+          },
+          {
+            "elapsed_ms": 104.745,
+            "sql_ms": 0.684,
+            "queries": 10,
+            "json_bytes": 268381,
+            "peak_python_bytes": 4042523
+          },
+          {
+            "elapsed_ms": 104.879,
+            "sql_ms": 0.68,
+            "queries": 10,
+            "json_bytes": 268381,
+            "peak_python_bytes": 4090563
+          },
+          {
+            "elapsed_ms": 104.257,
+            "sql_ms": 0.717,
+            "queries": 10,
+            "json_bytes": 268381,
+            "peak_python_bytes": 4164363
+          }
+        ],
+        "p50_elapsed_ms": 104.745,
+        "p95_elapsed_ms": 142.634
+      },
+      "warm_shared_compact": {
+        "samples": [
+          {
+            "elapsed_ms": 111.242,
+            "sql_ms": 0.66,
+            "queries": 10,
+            "json_bytes": 250190,
+            "peak_python_bytes": 4016659
+          },
+          {
+            "elapsed_ms": 149.737,
+            "sql_ms": 0.705,
+            "queries": 10,
+            "json_bytes": 250190,
+            "peak_python_bytes": 4286555
+          },
+          {
+            "elapsed_ms": 111.215,
+            "sql_ms": 0.684,
+            "queries": 10,
+            "json_bytes": 250190,
+            "peak_python_bytes": 4190739
+          },
+          {
+            "elapsed_ms": 110.977,
+            "sql_ms": 0.67,
+            "queries": 10,
+            "json_bytes": 250190,
+            "peak_python_bytes": 4016563
+          },
+          {
+            "elapsed_ms": 110.843,
+            "sql_ms": 0.675,
+            "queries": 10,
+            "json_bytes": 250190,
+            "peak_python_bytes": 4096368
+          }
+        ],
+        "p50_elapsed_ms": 111.215,
+        "p95_elapsed_ms": 149.737
+      },
+      "all_output_fields_and_digest_parity": true,
+      "output_digest": "317c73ccebd9e16992a35eddd9c34ab2e76f9020cd2bf839636c30d8cfd9e122"
+    },
+    "200": {
+      "frozen_baseline_full": {
+        "samples": [
+          {
+            "elapsed_ms": 1663.968,
+            "sql_ms": 43.298,
+            "queries": 3400,
+            "json_bytes": 538381,
+            "peak_python_bytes": 2691949
+          },
+          {
+            "elapsed_ms": 1662.709,
+            "sql_ms": 46.072,
+            "queries": 3400,
+            "json_bytes": 538381,
+            "peak_python_bytes": 2978858
+          },
+          {
+            "elapsed_ms": 1765.44,
+            "sql_ms": 49.833,
+            "queries": 3400,
+            "json_bytes": 538381,
+            "peak_python_bytes": 2756489
+          },
+          {
+            "elapsed_ms": 1664.553,
+            "sql_ms": 46.245,
+            "queries": 3400,
+            "json_bytes": 538381,
+            "peak_python_bytes": 2692805
+          },
+          {
+            "elapsed_ms": 1637.14,
+            "sql_ms": 44.841,
+            "queries": 3400,
+            "json_bytes": 538381,
+            "peak_python_bytes": 2649980
+          }
+        ],
+        "p50_elapsed_ms": 1663.968,
+        "p95_elapsed_ms": 1765.44
+      },
+      "shared_full": {
+        "samples": [
+          {
+            "elapsed_ms": 244.863,
+            "sql_ms": 1.902,
+            "queries": 10,
+            "json_bytes": 538381,
+            "peak_python_bytes": 8529399
+          },
+          {
+            "elapsed_ms": 288.663,
+            "sql_ms": 1.376,
+            "queries": 10,
+            "json_bytes": 538381,
+            "peak_python_bytes": 8399647
+          },
+          {
+            "elapsed_ms": 245.442,
+            "sql_ms": 1.277,
+            "queries": 10,
+            "json_bytes": 538381,
+            "peak_python_bytes": 8528825
+          },
+          {
+            "elapsed_ms": 290.478,
+            "sql_ms": 1.302,
+            "queries": 10,
+            "json_bytes": 538381,
+            "peak_python_bytes": 8370231
+          },
+          {
+            "elapsed_ms": 244.811,
+            "sql_ms": 1.266,
+            "queries": 10,
+            "json_bytes": 538381,
+            "peak_python_bytes": 8531091
+          }
+        ],
+        "p50_elapsed_ms": 245.442,
+        "p95_elapsed_ms": 290.478
+      },
+      "shared_compact": {
+        "samples": [
+          {
+            "elapsed_ms": 301.902,
+            "sql_ms": 1.309,
+            "queries": 10,
+            "json_bytes": 501890,
+            "peak_python_bytes": 8448791
+          },
+          {
+            "elapsed_ms": 258.235,
+            "sql_ms": 1.271,
+            "queries": 10,
+            "json_bytes": 501890,
+            "peak_python_bytes": 8528897
+          },
+          {
+            "elapsed_ms": 303.068,
+            "sql_ms": 1.271,
+            "queries": 10,
+            "json_bytes": 501890,
+            "peak_python_bytes": 8646807
+          },
+          {
+            "elapsed_ms": 301.36,
+            "sql_ms": 1.278,
+            "queries": 10,
+            "json_bytes": 501890,
+            "peak_python_bytes": 8528897
+          },
+          {
+            "elapsed_ms": 259.047,
+            "sql_ms": 1.269,
+            "queries": 10,
+            "json_bytes": 501890,
+            "peak_python_bytes": 8585471
+          }
+        ],
+        "p50_elapsed_ms": 301.36,
+        "p95_elapsed_ms": 303.068
+      },
+      "warm_frozen_baseline_full": {
+        "samples": [
+          {
+            "elapsed_ms": 1627.559,
+            "sql_ms": 41.335,
+            "queries": 3400,
+            "json_bytes": 538381,
+            "peak_python_bytes": 2853713
+          },
+          {
+            "elapsed_ms": 1621.841,
+            "sql_ms": 41.549,
+            "queries": 3400,
+            "json_bytes": 538381,
+            "peak_python_bytes": 2730488
+          },
+          {
+            "elapsed_ms": 1635.313,
+            "sql_ms": 41.845,
+            "queries": 3400,
+            "json_bytes": 538381,
+            "peak_python_bytes": 2694204
+          },
+          {
+            "elapsed_ms": 1631.138,
+            "sql_ms": 41.581,
+            "queries": 3400,
+            "json_bytes": 538381,
+            "peak_python_bytes": 2657003
+          },
+          {
+            "elapsed_ms": 1631.181,
+            "sql_ms": 41.324,
+            "queries": 3400,
+            "json_bytes": 538381,
+            "peak_python_bytes": 2689502
+          }
+        ],
+        "p50_elapsed_ms": 1631.138,
+        "p95_elapsed_ms": 1635.313
+      },
+      "warm_shared_full": {
+        "samples": [
+          {
+            "elapsed_ms": 288.734,
+            "sql_ms": 1.309,
+            "queries": 10,
+            "json_bytes": 538381,
+            "peak_python_bytes": 8646039
+          },
+          {
+            "elapsed_ms": 280.251,
+            "sql_ms": 1.329,
+            "queries": 10,
+            "json_bytes": 538381,
+            "peak_python_bytes": 8672263
+          },
+          {
+            "elapsed_ms": 250.687,
+            "sql_ms": 1.317,
+            "queries": 10,
+            "json_bytes": 538381,
+            "peak_python_bytes": 8459751
+          },
+          {
+            "elapsed_ms": 286.838,
+            "sql_ms": 1.263,
+            "queries": 10,
+            "json_bytes": 538381,
+            "peak_python_bytes": 8473263
+          },
+          {
+            "elapsed_ms": 245.179,
+            "sql_ms": 1.329,
+            "queries": 10,
+            "json_bytes": 538381,
+            "peak_python_bytes": 8690671
+          }
+        ],
+        "p50_elapsed_ms": 280.251,
+        "p95_elapsed_ms": 288.734
+      },
+      "warm_shared_compact": {
+        "samples": [
+          {
+            "elapsed_ms": 303.489,
+            "sql_ms": 1.334,
+            "queries": 10,
+            "json_bytes": 501890,
+            "peak_python_bytes": 8144591
+          },
+          {
+            "elapsed_ms": 258.397,
+            "sql_ms": 1.263,
+            "queries": 10,
+            "json_bytes": 501890,
+            "peak_python_bytes": 8524551
+          },
+          {
+            "elapsed_ms": 305.26,
+            "sql_ms": 1.436,
+            "queries": 10,
+            "json_bytes": 501890,
+            "peak_python_bytes": 8440287
+          },
+          {
+            "elapsed_ms": 260.999,
+            "sql_ms": 1.33,
+            "queries": 10,
+            "json_bytes": 501890,
+            "peak_python_bytes": 8381417
+          },
+          {
+            "elapsed_ms": 305.294,
+            "sql_ms": 1.315,
+            "queries": 10,
+            "json_bytes": 501890,
+            "peak_python_bytes": 8291975
+          }
+        ],
+        "p50_elapsed_ms": 303.489,
+        "p95_elapsed_ms": 305.294
+      },
+      "all_output_fields_and_digest_parity": true,
+      "output_digest": "322019e28e8f9ce57ea151d383b5fe006f33dc04568185e27b22c2d674fa3296"
+    }
+  }
+}

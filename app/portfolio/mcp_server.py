@@ -132,9 +132,13 @@ async def request(method, path, params=None, body=None):
                     "Retry the identical proposal ID and digest after checking connectivity."
                     if mutation and path.endswith("/commit")
                     else (
-                        "A preview may have been saved; retrying the same preview body does not post accounting."
-                        if mutation and path == "/proposals"
-                        else "Retry this read after checking the local application."
+                        "Retrieve operation_status for the same key; if accepted or running, resume that key. Never submit a new key to recover an uncertain outcome."
+                        if mutation and path.startswith("/operations")
+                        else (
+                            "A preview may have been saved; retrying the same preview body does not post accounting."
+                            if mutation and path == "/proposals"
+                            else "Retry this read after checking the local application."
+                        )
                     )
                 )
             )
@@ -204,6 +208,10 @@ async def records(
         "ownership",
         "reconciliations",
         "reconciliation_revisions",
+        "card_identities",
+        "card_aliases",
+        "card_coverage",
+        "card_activities",
         "report_runs",
         "reporting_groups",
         "group_members",
@@ -396,6 +404,55 @@ async def request_result(key: str, projection: str = "full") -> dict:
     )
 
 
+@mcp.tool(annotations=WRITE)
+async def submit_operation(
+    operation: str, key: str, data: dict, expected_connection: dict | None = None
+) -> dict:
+    """Save and dispatch atomic work; accepted is not committed. Recover by the same key."""
+    return await request(
+        "POST",
+        "/operations",
+        body={
+            "operation": operation,
+            "key": key,
+            "data": data,
+            "expected_connection": expected_connection,
+        },
+    )
+
+
+@mcp.tool(annotations=READ)
+async def operation_status(
+    key: str, projection: str = "compact", wait_seconds: int = 0
+) -> dict:
+    """Read durable execution stage, committed effects and separate reviewer attestations."""
+    return await request(
+        "GET",
+        "/operations",
+        params={"key": key, "projection": projection, "wait_seconds": wait_seconds},
+    )
+
+
+@mcp.tool(annotations=WRITE)
+async def resume_operation(key: str, expected_connection: dict | None = None) -> dict:
+    """Explicitly resume accepted/interrupted work; original identity and guards remain binding."""
+    return await request(
+        "POST",
+        "/operations/resume",
+        body={"key": key, "expected_connection": expected_connection},
+    )
+
+
+@mcp.tool(annotations=WRITE)
+async def cancel_operation(key: str, expected_connection: dict | None = None) -> dict:
+    """Cancel only before worker claim. Running/committed accounting cannot be cancelled here."""
+    return await request(
+        "POST",
+        "/operations/cancel",
+        body={"key": key, "expected_connection": expected_connection},
+    )
+
+
 @mcp.tool(annotations=READ)
 async def shortage_assessment(
     review_id: int,
@@ -428,6 +485,26 @@ async def outgoing_funding_assessment(observation_id: int) -> dict:
     """Assess an outgoing funding question and exact current source dependencies."""
     return await request(
         "GET", "/outgoing-funding-assessment", params={"observation_id": observation_id}
+    )
+
+
+@mcp.tool(annotations=READ)
+async def owner_custody_state(item_id: int) -> dict:
+    """Read a specific owner's remaining custody obligation and current payout digest."""
+    return await request("GET", f"/owner-custody-state/{item_id}")
+
+
+@mcp.tool(annotations=READ)
+async def storage_diagnostics() -> dict:
+    """Inspect SQLite storage and payload sizes without deleting or rewriting records."""
+    return await request("GET", "/storage-diagnostics")
+
+
+@mcp.tool(annotations=READ)
+async def card_state(card_id: int, as_of: str | None = None) -> dict:
+    """Read card liability, issuer coverage gaps and the exact current source digest."""
+    return await request(
+        "GET", f"/cards/{card_id}/state", params={"as_of": as_of} if as_of else None
     )
 
 

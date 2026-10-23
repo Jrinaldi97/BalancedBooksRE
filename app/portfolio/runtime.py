@@ -162,6 +162,16 @@ def project_event(detail, projection):
     )
 
 
+def empty_verification():
+    return {
+        "external_evidence": "not_recorded",
+        "latest_attestations": [],
+        "history": [],
+        "automated_external_validation": False,
+        "note": "Reviewer attestations bind the exact committed effects and registered source hashes; the application does not independently fetch or certify external evidence.",
+    }
+
+
 def operation_result(result, execution_state="committed", projection="full"):
     """API boundary states: call 'committed' only after the transaction commits."""
     from app.portfolio.service import digest
@@ -169,10 +179,7 @@ def operation_result(result, execution_state="committed", projection="full"):
 
     output = deepcopy(result)
     output["execution_state"] = execution_state
-    output["verification"] = {
-        "external_evidence": "not_recorded",
-        "note": "Accounting guards ran during execution; this API does not record external evidence verification.",
-    }
+    output["verification"] = empty_verification()
     if "results" in output:
         output["results"] = [
             operation_result(child, execution_state, projection)

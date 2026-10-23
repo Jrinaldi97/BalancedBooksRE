@@ -5,19 +5,27 @@ from app.portfolio import models as m
 from app.portfolio.allocations import DIMENSIONS
 
 
-def normalized_cash(db, obs, state):
+def normalized_cash(db, obs, state, *, rows=None, events=None, entity_id=None):
     from app.portfolio.service import fail, get, scope
     from app.portfolio.reports import ledger
 
     rows = [
         r
-        for r in ledger(db, obs.date, event_ids=state["event_ids"])
+        for r in (
+            rows
+            if rows is not None
+            else ledger(db, obs.date, event_ids=state["event_ids"])
+        )
         if r["role"] == "bank"
     ]
     if not rows:
         fail("cash_lineage", "No original bank movement was found")
-    entity = scope(db, obs.account_id).entity_id
-    events = {i: get(db, m.Event, i) for i in state["event_ids"]}
+    entity = entity_id if entity_id is not None else scope(db, obs.account_id).entity_id
+    events = (
+        events
+        if events is not None
+        else {i: get(db, m.Event, i) for i in state["event_ids"]}
+    )
     descendants = {obs.event_id}
     while True:
         expanded = descendants | {

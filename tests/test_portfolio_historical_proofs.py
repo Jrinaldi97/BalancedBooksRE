@@ -858,9 +858,9 @@ def test_whole_account_fast_path_skips_only_empty_legacy_discovery(
     calls = []
     normalize = lineage.normalized_cash
 
-    def counted(*args):
+    def counted(*args, **kwargs):
         calls.append(1)
-        return normalize(*args)
+        return normalize(*args, **kwargs)
 
     monkeypatch.setattr(lineage, "normalized_cash", counted)
     fast = shortage_assessment(db, whole.id, CUTOFF)

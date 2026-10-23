@@ -11,6 +11,7 @@ from fastapi import (
     File,
     Form,
     Query,
+    BackgroundTasks,
 )
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
@@ -20,6 +21,7 @@ from app.models.accounts import Account
 from app.portfolio import models as m, schemas as s, service as svc, reports
 from app.portfolio.imports import parse_bank
 from app.portfolio import runtime
+from app.portfolio import operations
 
 router = APIRouter(prefix="/api/portfolio", tags=["BalancedBooksRE"])
 
@@ -71,6 +73,13 @@ def admin_operation(request, operation):
         )
 
 
+def committed_result(db, result, projection="full"):
+    return {
+        **runtime.operation_result(result, projection=projection),
+        "verification": operations.verification_state(db, result["key"]),
+    }
+
+
 @router.get("/context")
 def context(db: Session = Depends(get_db)):
     from pathlib import Path
@@ -92,7 +101,7 @@ def context(db: Session = Depends(get_db)):
             "company_file": Path(database).name if database else None,
             "database_engine": db.get_bind().dialect.name,
             "upstream_base_version": __version__,
-            "portfolio_release": "2026.10-evidence-workflows.1",
+            "portfolio_release": "2026.10-evidence-workflows.2",
             "schema_revisions": versions,
             "command_schema_digest": svc.digest(commands()),
             "company_session_id": runtime.company_session_id(db),
@@ -102,8 +111,14 @@ def context(db: Session = Depends(get_db)):
             "observation_states_max_ids": 200,
             "projections": ["full", "compact"],
             "mutation_preconditions": runtime.ConnectionExpectation.model_json_schema(),
-            "request_status": "Committed results only; an absent key does not prove a request is not running.",
-            "external_verification_attestations": False,
+            "request_status": "request_result recovers committed synchronous work. submit_operation/operation_status also persist accepted and running stages; explicitly resume interrupted work with its same key.",
+            "durable_operations": {
+                "database": "sqlite",
+                "max_outstanding": 200,
+                "max_request_bytes": 4194304,
+                "automatic_restart_execution": False,
+            },
+            "external_verification_attestations": True,
         },
         "product": "BalancedBooksRE",
         "interface_version": "1",
@@ -161,7 +176,7 @@ def command(
             db, payload.model_dump(exclude={"expected_connection"}), actor(db)
         )
         db.commit()
-        return runtime.operation_result(result, projection=projection)
+        return committed_result(db, result, projection)
     except (svc.Problem, ValidationError, IntegrityError) as exc:
         db.rollback()
         raise error(exc) from exc
@@ -254,8 +269,8 @@ def commit(
         if proposal.digest != payload.digest:
             svc.fail("preview_conflict", "Preview digest does not match")
         if proposal.committed_result:
-            return runtime.operation_result(
-                {**proposal.committed_result, "replayed": True}, projection=projection
+            return committed_result(
+                db, {**proposal.committed_result, "replayed": True}, projection
             )
         revisions = {str(e.id): e.revision for e in db.query(m.Entity)}
         if revisions != proposal.revisions:
@@ -268,7 +283,7 @@ def commit(
         )
         proposal.committed_result = result
         db.commit()
-        return runtime.operation_result(result, projection=projection)
+        return committed_result(db, result, projection)
     except (svc.Problem, ValidationError, IntegrityError) as exc:
         db.rollback()
         raise error(exc) from exc
@@ -279,7 +294,14 @@ def proposal_detail(
     ident: int, projection: runtime.Projection = "full", db: Session = Depends(get_db)
 ):
     try:
-        return runtime.proposal_result(svc.get(db, m.Proposal, ident), projection)
+        proposal = svc.get(db, m.Proposal, ident)
+        result = runtime.proposal_result(proposal, projection)
+        if proposal.committed_result:
+            result["result"] = committed_result(
+                db, proposal.committed_result, projection
+            )
+            result["verification"] = result["result"]["verification"]
+        return result
     except svc.Problem as exc:
         raise error(exc) from exc
 
@@ -374,6 +396,10 @@ LISTS = {
     "ownership": m.Ownership,
     "reconciliations": m.Reconciliation,
     "reconciliation_revisions": m.ReconciliationRevision,
+    "card_identities": m.CardIdentity,
+    "card_aliases": m.CardAlias,
+    "card_coverage": m.CardCoverage,
+    "card_activities": m.CardActivity,
     "report_runs": m.ReportRun,
     "reporting_groups": m.ReportingGroup,
     "group_members": m.GroupMember,
@@ -593,7 +619,7 @@ def observation_states(
     projection: runtime.Projection = "full",
     db: Session = Depends(get_db),
 ):
-    from app.portfolio.observation_state import observation_state as read_state
+    from app.portfolio.observation_state import observation_states as read_states
 
     if any(ident <= 0 for ident in ids) or len(set(ids)) != len(ids):
         raise HTTPException(
@@ -601,7 +627,7 @@ def observation_states(
         )
     try:
         reports.read_snapshot(db)
-        states = [read_state(db, ident, as_of) for ident in ids]
+        states = read_states(db, ids, as_of)
         return {
             "states": [runtime.project_state(state, projection) for state in states],
             "count": len(states),
@@ -641,8 +667,136 @@ def request_result(
         "committed": True,
         "status": "committed",
         "execution_state": "committed",
-        "result": runtime.operation_result(record.result, projection=projection),
+        "result": {
+            **runtime.operation_result(record.result, projection=projection),
+            "verification": operations.verification_state(db, key),
+        },
     }
+
+
+def operation_authority(db, request):
+    from app.models.api_tokens import ApiToken
+    from app.models.users import User
+
+    principal = getattr(request.state, "token_principal", None)
+    if principal and principal.get("username", "").startswith("token:"):
+        row = (
+            db.query(ApiToken)
+            .filter_by(label=principal["username"][6:], is_active=True)
+            .first()
+        )
+        kind = "token"
+    else:
+        row = (
+            db.query(User)
+            .filter_by(username=request.session.get("username"), is_active=True)
+            .first()
+        )
+        kind = "session"
+    if row is None:
+        raise HTTPException(
+            403, detail="Durable operations require a registered active principal"
+        )
+    return {"kind": kind, "id": row.id}
+
+
+@router.post("/operations", status_code=202)
+def submit_operation(
+    payload: runtime.CommandInput,
+    request: Request,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    admin_operation(request, payload.operation)
+    try:
+        serialize_write(db)
+        result, schedule = operations.admission(
+            db, payload, operation_authority(db, request), actor(db)
+        )
+        db.commit()
+        if schedule:
+            background.add_task(
+                operations.dispatch_operation, db.get_bind(), payload.key
+            )
+        return result
+    except (svc.Problem, ValidationError, IntegrityError) as exc:
+        db.rollback()
+        raise error(exc) from exc
+
+
+class OperationKeyInput(s.Input):
+    key: str = s.Field(min_length=1, max_length=120)
+    expected_connection: runtime.ConnectionExpectation | None = None
+
+
+@router.get("/operations")
+def operation_status(
+    key: str,
+    projection: runtime.Projection = "full",
+    wait_seconds: int = Query(default=0, ge=0, le=30),
+    db: Session = Depends(get_db),
+):
+    import time
+
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        result = operations.operation_status(db, key, projection)
+        if (
+            result["execution_state"] not in ("accepted", "running")
+            or time.monotonic() >= deadline
+        ):
+            return result
+        db.rollback()
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+
+
+@router.post("/operations/resume", status_code=202)
+def resume_operation(
+    payload: OperationKeyInput,
+    request: Request,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    try:
+        serialize_write(db)
+        runtime.check_connection(
+            db, payload.expected_connection, lambda: svc.digest(commands())
+        )
+        row = svc.get(db, m.AgentOperation, payload.key)
+        operations.authorize(
+            db, operation_authority(db, request), row.request["operation"]
+        )
+        result = operations.operation_status(db, payload.key)
+        db.commit()
+        if result["resumable"]:
+            background.add_task(
+                operations.dispatch_operation, db.get_bind(), payload.key
+            )
+        return result
+    except (svc.Problem, ValidationError, IntegrityError) as exc:
+        db.rollback()
+        raise error(exc) from exc
+
+
+@router.post("/operations/cancel")
+def cancel_operation(
+    payload: OperationKeyInput, request: Request, db: Session = Depends(get_db)
+):
+    try:
+        serialize_write(db)
+        runtime.check_connection(
+            db, payload.expected_connection, lambda: svc.digest(commands())
+        )
+        row = svc.get(db, m.AgentOperation, payload.key)
+        operations.authorize(
+            db, operation_authority(db, request), row.request["operation"]
+        )
+        result = operations.cancel_operation(db, payload.key, actor(db))
+        db.commit()
+        return result
+    except (svc.Problem, ValidationError, IntegrityError) as exc:
+        db.rollback()
+        raise error(exc) from exc
 
 
 @router.get("/reviews/{ident}/shortage-assessment")
@@ -686,5 +840,35 @@ def outgoing_funding_assessment(observation_id: int, db: Session = Depends(get_d
 
     try:
         return assess(db, observation_id)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/owner-custody-state/{item_id}")
+def owner_custody_state(item_id: int, db: Session = Depends(get_db)):
+    from app.portfolio.owner_distributions import owner_custody_state as read_state
+
+    try:
+        return read_state(db, item_id)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/storage-diagnostics")
+def storage_diagnostics(db: Session = Depends(get_db)):
+    from app.portfolio.storage_diagnostics import storage_diagnostics as read_storage
+
+    try:
+        return read_storage(db)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/cards/{card_id}/state")
+def card_state(card_id: int, as_of: date | None = None, db: Session = Depends(get_db)):
+    from app.portfolio.card_workflows import card_state as read_state
+
+    try:
+        return read_state(db, card_id, as_of)
     except svc.Problem as exc:
         raise error(exc) from exc

@@ -679,3 +679,79 @@ class OutgoingFundingResolution(Input):
 
 
 CONTRACTS["resolve_outgoing_funding_source"] = OutgoingFundingResolution
+
+
+from app.portfolio.operations import OperationVerificationInput  # noqa: E402
+
+CONTRACTS["record_operation_verification"] = OperationVerificationInput
+
+
+class OwnerDistributionShare(Input):
+    party_id: Id
+    fund_id: Id
+    ownership_id: Id
+    share_ppm: Annotated[StrictInt, Field(gt=0, le=1000000)]
+    amount_cents: Cents
+
+
+class PostedOwnerDistributionInput(Input):
+    mode: Literal["paired", "receipt_only"]
+    receipt: PostedTransferLeg
+    withdrawal: PostedTransferLeg | None = None
+    sender_entity_id: Id
+    holder_entity_id: Id
+    distribution_date: date
+    distribution_account_id: Id | None = None
+    custody_account_id: Id
+    sender_own_fund_id: Id | None = None
+    code: str = Field(min_length=1, max_length=40)
+    beneficiaries: list[OwnerDistributionShare] = Field(min_length=1, max_length=100)
+    source_evidence: str = Field(min_length=1)
+    funding_evidence: str = Field(min_length=1)
+    coverage_gap: str | None = Field(default=None, min_length=1)
+    evidence: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def source_variant(self):
+        if self.mode == "paired":
+            if (
+                self.withdrawal is None
+                or self.distribution_account_id is None
+                or self.coverage_gap is not None
+            ):
+                raise ValueError(
+                    "Paired mode needs the actual withdrawal and distribution account, without a coverage gap"
+                )
+        elif (
+            self.withdrawal is not None
+            or self.distribution_account_id is not None
+            or self.sender_own_fund_id is not None
+            or not self.coverage_gap
+        ):
+            raise ValueError(
+                "Receipt-only mode needs an explicit coverage gap and must not declare a sender posting"
+            )
+        return self
+
+
+CONTRACTS["correct_posted_owner_distribution_to_holder"] = PostedOwnerDistributionInput
+
+
+class OwnerCustodyPayoutComponent(Input):
+    item_id: Id
+    party_id: Id
+    fund_id: Id
+    amount_cents: Cents = Field(gt=0)
+    expected_item_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    recipient_evidence: str = Field(min_length=1)
+
+
+class PostedOwnerCustodyPayoutInput(Input):
+    observation: PostedTransferLeg
+    components: list[OwnerCustodyPayoutComponent] = Field(min_length=1, max_length=100)
+    evidence: str = Field(min_length=1)
+
+
+CONTRACTS["correct_posted_owner_custody_payout"] = PostedOwnerCustodyPayoutInput
+# Import the module for registration; direct card_schemas imports work as well.
+from app.portfolio import card_schemas as card_schemas  # noqa: E402
