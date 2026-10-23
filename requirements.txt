@@ -61,6 +61,7 @@ slowapi>=0.1.9,<1.0
 
 # BalancedBooksRE bank workbook imports
 openpyxl>=3.1.5,<4
+xlrd==2.0.2  # strict BIFF5/8 value-only XLS adapter; formulas rejected before cached values
 
 mcp>=1.26,<2
 

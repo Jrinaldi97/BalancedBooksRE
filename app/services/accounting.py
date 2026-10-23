@@ -203,11 +203,16 @@ def create_journal_entry(
     # Portfolio accounts may only be posted through the coordinated service.
     # Legacy single-company routes cannot silently bypass entity/fund controls.
     from app.portfolio.models import AccountScope
-    portfolio_accounts = db.query(AccountScope).filter(
-        AccountScope.account_id.in_([ln["account_id"] for ln in lines])
-    ).all()
+
+    portfolio_accounts = (
+        db.query(AccountScope)
+        .filter(AccountScope.account_id.in_([ln["account_id"] for ln in lines]))
+        .all()
+    )
     if portfolio_accounts and not db.info.get("portfolio_posting"):
-        raise DataProblem("Use the BalancedBooksRE portfolio workflow for these accounts")
+        raise DataProblem(
+            "Use the BalancedBooksRE portfolio workflow for these accounts"
+        )
 
     if not bypass_closing_date:
         # Local import: closing_date imports the settings model, so importing

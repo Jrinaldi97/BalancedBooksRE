@@ -1,7 +1,45 @@
 """Codex investigation filters must reach the same REST contract."""
 
 import asyncio
+import pytest
 from app.portfolio import mcp_server
+
+
+@pytest.mark.parametrize(
+    "tool,args,method,path",
+    [
+        (
+            "submit_operation",
+            {"operation": "create_entity", "key": "a?/#", "data": {}},
+            "POST",
+            "/operations",
+        ),
+        ("operation_status", {"key": "a?/#"}, "GET", "/operations"),
+        ("resume_operation", {"key": "a?/#"}, "POST", "/operations/resume"),
+        ("cancel_operation", {"key": "a?/#"}, "POST", "/operations/cancel"),
+        ("owner_custody_state", {"item_id": 7}, "GET", "/owner-custody-state/7"),
+        ("storage_diagnostics", {}, "GET", "/storage-diagnostics"),
+        ("card_state", {"card_id": 9, "as_of": "2026-01-31"}, "GET", "/cards/9/state"),
+    ],
+)
+def test_new_native_tools_reach_intentional_backend_routes(
+    monkeypatch, tool, args, method, path
+):
+    captured = {}
+
+    async def request(method, path, params=None, body=None):
+        captured.update(method=method, path=path, params=params, body=body)
+        return {"native": True}
+
+    monkeypatch.setattr(mcp_server, "request", request)
+    assert asyncio.run(getattr(mcp_server, tool)(**args)) == {"native": True}
+    assert (captured["method"], captured["path"]) == (method, path)
+    if "key" in args:
+        assert (captured["params"] if method == "GET" else captured["body"])[
+            "key"
+        ] == args["key"]
+    if tool == "card_state":
+        assert captured["params"] == {"as_of": "2026-01-31"}
 
 
 def test_records_forwards_investigation_filters(monkeypatch):

@@ -1494,7 +1494,7 @@ def test_context_identifies_company_and_command_contract(db_session):
     identity = context(db_session)["connection"]
     assert identity["company_name"] == "Synthetic test company"
     assert identity["command_schema_digest"] == digest(commands())
-    assert identity["portfolio_release"] == "2026.10-pooled-corrections.2"
+    assert identity["portfolio_release"] == "2026.10-evidence-workflows.3"
     assert identity["database_engine"] == "sqlite"
 
 
@@ -2214,6 +2214,12 @@ def test_historical_alert_resolution_does_not_use_later_deficit(portfolio):
         opening_cents=100000,
         ending_cents=0,
     )
+    with pytest.raises(Problem) as stale:
+        run(db, "resolve_historical_shortage", **data)
+    assert stale.value.code == "stale_assessment"
+    data["expected_assessment_digest"] = shortage_assessment(
+        db, alert.id, date(2026, 2, 28)
+    )["assessment_digest"]
     result = run(db, "resolve_historical_shortage", **data)
     assert result["financial_entries_added"] is False
     assert db.get(m.ReviewItem, alert.id).status == "resolved"

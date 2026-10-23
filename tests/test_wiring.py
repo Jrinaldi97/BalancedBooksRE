@@ -263,15 +263,28 @@ def test_collector_finds_something():
 # - One-shot seeds run once during setup, not from the running SPA
 # - Legacy paths superseded by newer endpoints (kept for backwards compat)
 _INTENTIONAL_BACKEND_ONLY: set[tuple[str, str]] = {
-    # Machine interface exercised by the portfolio MCP integration test.
+    # Machine interface called by app/portfolio/mcp_server.py, outside the SPA.
     ("GET", "/api/portfolio/observations/{ident}/state"),
-    ("GET", "/api/portfolio/requests/{key}"),
+    ("GET", "/api/portfolio/observation-states"),
+    ("GET", "/api/portfolio/proposals/{ident}"),
+    ("GET", "/api/portfolio/requests"),
+    # These have native MCP callers, verified by test_portfolio_mcp_filters.
+    ("POST", "/api/portfolio/operations"),
+    ("GET", "/api/portfolio/operations"),
+    ("POST", "/api/portfolio/operations/resume"),
+    ("POST", "/api/portfolio/operations/cancel"),
+    ("GET", "/api/portfolio/owner-custody-state/{item_id}"),
+    ("GET", "/api/portfolio/storage-diagnostics"),
+    ("GET", "/api/portfolio/cards/{card_id}/state"),
+    # Compatibility alias for existing exact-key recovery clients.
+    ("GET", "/api/portfolio/requests/{key:path}"),
+    ("GET", "/api/portfolio/reconciliations/{ident}/revision-state"),
+    ("GET", "/api/portfolio/outgoing-funding-assessment"),
     ("GET", "/api/portfolio/reviews/{ident}/shortage-assessment"),
-    ("GET","/api/portfolio/ownership-as-of"),
-    ('POST','/api/portfolio/proposals'),
-    ('POST','/api/portfolio/proposals/{ident}/commit'),
-    ('POST','/api/portfolio/statements/save'),
-
+    ("GET", "/api/portfolio/ownership-as-of"),
+    ("POST", "/api/portfolio/proposals"),
+    ("POST", "/api/portfolio/proposals/{ident}/commit"),
+    ("POST", "/api/portfolio/statements/save"),
     ("POST", "/api/stripe/webhook"),  # legacy alias for provider webhook
     # A garnishment order is ended, never deleted; DELETE stays so an API
     # client is told why (405) and where to go (POST .../end).

@@ -2,6 +2,8 @@
 
 
 def install(connection):
+    from sqlalchemy import inspect
+
     statements = [
         """CREATE TRIGGER IF NOT EXISTS re_allocation_replace BEFORE INSERT ON re_line_allocations
         WHEN NEW.id IS NOT NULL AND EXISTS(SELECT 1 FROM re_line_allocations WHERE id=NEW.id)
@@ -40,6 +42,7 @@ def install(connection):
         ("re_schedule_postings", "1"),
         ("re_schedules", "1"),
         ("re_reconciliations", "1"),
+        ("re_reconciliation_revisions", "1"),
         ("re_journal_scopes", "1"),
         ("re_line_scopes", "1"),
         ("re_account_scopes", "1"),
@@ -51,9 +54,28 @@ def install(connection):
         ("re_requests", "1"),
         ("re_report_runs", "1"),
     ]:
+        # Earlier migrations also invoke install before the revision table exists.
+        if table == "re_reconciliation_revisions" and not inspect(connection).has_table(
+            table
+        ):
+            continue
         for operation in ("UPDATE", "DELETE"):
             statements.append(
                 f"CREATE TRIGGER IF NOT EXISTS re_guard_{table}_{operation} BEFORE {operation} ON {table} WHEN {condition} BEGIN SELECT RAISE(ABORT,'Posted portfolio history is immutable'); END"
             )
     for sql in statements:
         connection.exec_driver_sql(sql)
+    if inspect(connection).has_table("re_reconciliation_revisions"):
+        connection.exec_driver_sql(
+            """CREATE TRIGGER IF NOT EXISTS re_revision_replace
+        BEFORE INSERT ON re_reconciliation_revisions
+        WHEN EXISTS(SELECT 1 FROM re_reconciliation_revisions
+          WHERE id=NEW.id OR supersedes_id=NEW.supersedes_id OR replacement_id=NEW.replacement_id)
+        BEGIN SELECT RAISE(ABORT,'Reviewed reconciliation history is immutable'); END"""
+        )
+    from app.portfolio.operation_models import install_guards
+
+    install_guards(connection)
+    from app.portfolio.card_models import install_card_guards
+
+    install_card_guards(connection)

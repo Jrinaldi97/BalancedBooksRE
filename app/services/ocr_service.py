@@ -109,8 +109,13 @@ def tesseract_cmd() -> Optional[str]:
     if found:
         return found
     for cand in _tesseract_candidates():
-        if cand.is_file():
-            return str(cand)
+        try:
+            if cand.is_file():
+                return str(cand)
+        except OSError:
+            # Optional installer locations may be inaccessible to a local
+            # desktop account. Keep searching instead of breaking app startup.
+            continue
     return None
 
 

@@ -15,6 +15,7 @@ from app.models.accounts import Account, AccountType
 from app.models.transactions import Transaction, TransactionLine
 from app.services.accounting import create_journal_entry
 from app.portfolio import models as m, schemas as s
+from app.portfolio.outgoing_funding import resolve_outgoing_funding_source
 
 
 class Problem(ValueError):
@@ -452,9 +453,11 @@ def post(db, data, actor, allocation_journals=(), correction_custody_baselines=N
                 and not data.observed
             ):
                 details = {
-                    "kind": "existing_cash_reallocation"
-                    if allocation_journals
-                    else "new_release",
+                    "kind": (
+                        "existing_cash_reallocation"
+                        if allocation_journals
+                        else "new_release"
+                    ),
                     "date": data.date.isoformat(),
                     "account_id": account_id,
                     "fund_id": fund_id,
@@ -477,9 +480,11 @@ def post(db, data, actor, allocation_journals=(), correction_custody_baselines=N
                     "required_evidence": "Proven source allocations or linked funding that removes this deficit; an atomic batch may establish supported dependencies. No financing is inferred.",
                 }
                 raise Problem(
-                    "allocation_source_deficit"
-                    if allocation_journals
-                    else "insufficient_funds",
+                    (
+                        "allocation_source_deficit"
+                        if allocation_journals
+                        else "insufficient_funds"
+                    ),
                     "Fund has insufficient supported holdings; resolve the identified funding dependency",
                     details,
                 )
@@ -628,16 +633,31 @@ def import_bank(db, data, actor):
             ]
         )
         occurrences[fingerprint] += 1
+        legacy_key = f"{data.source_sha256}:{number}"
         key = (
             "id:" + row.external_id
             if row.external_id
-            else f"{data.source_sha256}:{number}"
+            else (
+                f"{data.source_sha256}:sheet:{digest(row.source_sheet)}:{number}"
+                if row.source_sheet is not None
+                else legacy_key
+            )
         )
         old = (
             db.query(m.BankObservation)
             .filter_by(account_id=data.account_id, source_key=key)
             .first()
         )
+        if old is None and not row.external_id and row.source_sheet is not None:
+            # Before sheet-scoped identities, XLSX rows used SHA:index. Reuse
+            # those immutable rows only for the same original selected sheet.
+            legacy = (
+                db.query(m.BankObservation)
+                .filter_by(account_id=data.account_id, source_key=legacy_key)
+                .first()
+            )
+            if legacy is not None and legacy.source.get("sheet") == row.source_sheet:
+                old = legacy
         if old:
             if old.fingerprint != fingerprint:
                 fail(
@@ -971,9 +991,7 @@ def match_transfer(db, data, actor):
         (
             "internal"
             if a.entity_id == b.entity_id
-            else "investing"
-            if data.purpose == "advance"
-            else "financing"
+            else "investing" if data.purpose == "advance" else "financing"
         ),
         data.evidence,
     )
@@ -1067,9 +1085,7 @@ def match_transfer(db, data, actor):
         (
             "internal"
             if a.entity_id == b.entity_id
-            else "financing"
-            if data.purpose == "advance"
-            else "investing"
+            else "financing" if data.purpose == "advance" else "investing"
         ),
         data.evidence,
     )
@@ -1618,6 +1634,9 @@ def execute(db, command, actor="codex"):
     if command.operation not in s.CONTRACTS:
         fail("unsupported_operation", "Unknown portfolio operation")
     request_hash = digest(command.model_dump(mode="json", exclude={"key"}))
+    from app.portfolio.operations import guard_reserved_request, mark_committed
+
+    guard_reserved_request(db, command, request_hash)
     old = db.get(m.RequestRecord, command.key)
     if old:
         if old.digest != request_hash:
@@ -1635,54 +1654,24 @@ def execute(db, command, actor="codex"):
             "validate_existing_correction",
             "resolve_historical_shortage",
             "resolve_loan_funding_source",
+            "resolve_outgoing_funding_source",
         }
-        before_reviews = (
-            {r.id: r.status for r in db.query(m.ReviewItem)} if tracked else {}
-        )
+        from contextlib import nullcontext
+        from app.portfolio.review_effects import ReviewEffects
+
+        tracked = tracked or command.operation == "batch"
         try:
-            result = OPERATIONS[command.operation](db, data, actor)
+            with ReviewEffects(db) if tracked else nullcontext() as effects:
+                result = OPERATIONS[command.operation](db, data, actor)
+                db.flush()
+                if tracked:
+                    result["review_lifecycle"] = effects.result()
         finally:
             db.info.pop("portfolio_command_key", None)
             db.info.pop("portfolio_event_ordinal", None)
-        db.flush()
-        if tracked:
-            changed = [
-                r
-                for r in db.query(m.ReviewItem)
-                if r.id not in before_reviews or r.status != before_reviews[r.id]
-            ]
-            closed = [
-                r.id
-                for r in changed
-                if before_reviews.get(r.id) == "open" and r.status == "resolved"
-            ]
-            new_open = [
-                r.id
-                for r in changed
-                if r.id not in before_reviews and r.status == "open"
-            ]
-            result["review_lifecycle"] = {
-                "preexisting_closed_ids": closed,
-                "new_open_ids": new_open,
-                "gross_closures": len(closed),
-                "new_open_count": len(new_open),
-                "net_open_reduction": len(closed) - len(new_open),
-                "transitions": [
-                    {
-                        "review_id": r.id,
-                        "previous_status": before_reviews.get(r.id),
-                        "status": r.status,
-                        "code": r.code,
-                        "observation_id": r.observation_id,
-                        "event_id": r.event_id,
-                        "detail": r.detail,
-                        "replaces_review_ids": closed if r.id in new_open else [],
-                    }
-                    for r in changed
-                ],
-            }
-        for entity in db.query(m.Entity).all():
-            entity.revision += 1
+        if command.operation != "record_operation_verification":
+            for entity in db.query(m.Entity).all():
+                entity.revision += 1
         result = {
             "committed": True,
             "operation": command.operation,
@@ -1698,6 +1687,7 @@ def execute(db, command, actor="codex"):
                 actor=actor,
             )
         )
+        mark_committed(db, command.key)
         db.flush()
     return result
 
@@ -3432,9 +3422,11 @@ def correct_posted_party_balance(db, data, actor):
             ],
         ),
         actor,
-        allocation_journals=[s.Journal(entity_id=bank.entity_id, lines=funding_delta)]
-        if funding_delta
-        else [],
+        allocation_journals=(
+            [s.Journal(entity_id=bank.entity_id, lines=funding_delta)]
+            if funding_delta
+            else []
+        ),
     )
     if funding_rows:
         ident = physical[0]["line_id"]
@@ -3518,147 +3510,9 @@ OPERATIONS["correct_posted_party_balance"] = correct_posted_party_balance
 
 def validate_existing_correction(db, data, actor):
     """Resolve an already satisfied suspense review without economic entries."""
-    from app.portfolio.observation_state import observation_state
-    from app.portfolio.reports import ledger
+    from app.portfolio.correction_validation import validate_existing
 
-    obs = get(db, m.BankObservation, data.observation.observation_id)
-    review = get(db, m.ReviewItem, data.observation.review_id)
-    if (
-        review.observation_id != obs.id
-        or review.code != "suspense"
-        or review.status != "open"
-    ):
-        fail("review_state", "Choose this observation's open suspense review")
-    state = observation_state(db, obs.id)
-    if state["state_digest"] != data.observation.expected_state_digest:
-        fail("stale_state", "Observation changed; inspect it again")
-    if (
-        data.corrective_event_id == obs.event_id
-        or data.corrective_event_id not in state["event_ids"]
-    ):
-        fail(
-            "correction_lineage",
-            "Identify a correction explicitly linked to this observation",
-        )
-    if any(state["suspense_residuals"].values()):
-        fail(
-            "correction_residual",
-            "Scoped suspense remains on one or both reporting bases",
-        )
-    bank = scope(db, obs.account_id)
-    correction = get(db, m.Event, data.corrective_event_id)
-    if (
-        not db.query(m.JournalScope)
-        .filter_by(event_id=correction.id, entity_id=bank.entity_id)
-        .first()
-    ):
-        fail("wrong_entity", "Correction does not belong to the observed bank entity")
-    if state["bank_movements"] != [
-        {
-            "account_id": obs.account_id,
-            "date": obs.date.isoformat(),
-            "amount_cents": obs.amount_cents,
-        }
-    ]:
-        fail(
-            "cash_lineage",
-            "This validation requires the original bank movement without other economic legs",
-        )
-    dimensions = ("property_id", "unit_id", "fund_id", "counterparty_id", "item")
-    identities = set()
-    for expected in data.balances:
-        account = scope(db, expected.account_id, bank.entity_id)
-        if (
-            account.role in ("bank", "bridge", "suspense_credit", "suspense_debit")
-            or expected.amount_cents == 0
-        ):
-            fail(
-                "expected_balance",
-                "Identify the nonzero supported economic classification",
-            )
-        identity = (expected.account_id, *(getattr(expected, k) for k in dimensions))
-        if identity in identities:
-            fail("expected_balance", "Each expected scope must be unique")
-        identities.add(identity)
-        if account.role in (
-            "receivable",
-            "payable",
-            "custody_asset",
-            "custody_liability",
-        ):
-            if not expected.party_id:
-                fail(
-                    "missing_beneficiary",
-                    "Identify the supported obligation beneficiary",
-                )
-            get(db, m.Party, expected.party_id)
-            if expected.fund_id:
-                if (
-                    get(db, m.Fund, expected.fund_id).beneficiary_id
-                    != expected.party_id
-                ):
-                    fail("wrong_beneficiary", "Fund and specified beneficiary disagree")
-            elif (correction.source or {}).get("party_id") != expected.party_id:
-                fail(
-                    "missing_beneficiary",
-                    "Correction has no typed association to this party; retain the review",
-                )
-        for basis in ("accrual", "modified_cash_bank_posting"):
-            rows = ledger(
-                db,
-                date.max,
-                account_id=expected.account_id,
-                basis=basis,
-                event_ids=state["event_ids"],
-            )
-            matching = [
-                r
-                for r in rows
-                if all(r.get(k) == getattr(expected, k) for k in dimensions)
-            ]
-            amount = sum(r["debit_cents"] - r["credit_cents"] for r in matching)
-            if amount != expected.amount_cents or not any(
-                r["event_id"] == correction.id for r in matching
-            ):
-                fail(
-                    "expected_balance",
-                    "Linked correction does not establish the stated scope and amount on both bases",
-                )
-    expected_totals = {
-        (row.account_id, *(getattr(row, k) for k in dimensions)): row.amount_cents
-        for row in data.balances
-    }
-    for basis in ("accrual", "modified_cash_bank_posting"):
-        actual = defaultdict(int)
-        for row in ledger(db, date.max, basis=basis, event_ids=state["event_ids"]):
-            if row["role"] == "bank" or row["role"].startswith("suspense"):
-                continue
-            actual[(row["account_id"], *(row.get(k) for k in dimensions))] += (
-                row["debit_cents"] - row["credit_cents"]
-            )
-        if {key: amount for key, amount in actual.items() if amount} != expected_totals:
-            fail(
-                "expected_balance",
-                "Expected balances must describe the entire effective economic classification",
-            )
-    review.status = "resolved"
-    review.resolved_event_id = correction.id
-    review.resolution = json.dumps(
-        {
-            "method": "validated_existing_correction",
-            "evidence": data.evidence,
-            "state_digest": state["state_digest"],
-            "balances": [row.model_dump() for row in data.balances],
-        },
-        sort_keys=True,
-    )
-    return {
-        "review_id": review.id,
-        "resolved_review_ids": [review.id],
-        "validated_event_id": correction.id,
-        "new_financial_events": 0,
-        "bank_cash_delta_cents": 0,
-    }
+    return validate_existing(db, data, actor)
 
 
 OPERATIONS["validate_existing_correction"] = validate_existing_correction
@@ -3752,3 +3606,46 @@ def resolve_loan_funding_source(db, data, actor):
 
 
 OPERATIONS["resolve_loan_funding_source"] = resolve_loan_funding_source
+
+
+OPERATIONS["resolve_outgoing_funding_source"] = resolve_outgoing_funding_source
+
+
+# Reviewed statement revisions are metadata-only and preserve every old snapshot.
+def revise_reconciliation(db, data, actor):
+    from app.portfolio.reconciliation_evidence import revise_reconciliation as revise
+
+    return revise(db, data, actor)
+
+
+OPERATIONS["revise_reconciliation"] = revise_reconciliation
+
+
+def record_operation_verification(db, data, actor):
+    from app.portfolio.operations import record_verification
+
+    return record_verification(db, data, actor)
+
+
+OPERATIONS["record_operation_verification"] = record_operation_verification
+
+
+def correct_posted_owner_distribution_to_holder(db, data, actor):
+    from app.portfolio.owner_distributions import correct_distribution
+
+    return correct_distribution(db, data, actor)
+
+
+def correct_posted_owner_custody_payout(db, data, actor):
+    from app.portfolio.owner_distributions import correct_payout
+
+    return correct_payout(db, data, actor)
+
+
+OPERATIONS["correct_posted_owner_distribution_to_holder"] = (
+    correct_posted_owner_distribution_to_holder
+)
+OPERATIONS["correct_posted_owner_custody_payout"] = correct_posted_owner_custody_payout
+from app.portfolio.card_workflows import CARD_OPERATIONS  # noqa: E402
+
+OPERATIONS.update(CARD_OPERATIONS)

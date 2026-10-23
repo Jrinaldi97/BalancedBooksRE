@@ -1,0 +1,80 @@
+{
+  "scope": "Fresh synthetic SQLite; 30 observations, 20 allocation and 20 classification revisions per source line, 5 ORM-evicted samples; 3 dated projections on both bases. Includes serialization; OS cache uncontrolled; excludes production/network/writer-lock/RSS measurements.",
+  "baseline_commit": "5da53e60bf4ae09b141f9201c3cb7e8b5cde0527",
+  "revision_rows": 1200,
+  "stored_prose_bytes": 10752000,
+  "frozen_baseline": {
+    "samples": [
+      {
+        "elapsed_ms": 82.35,
+        "peak_python_bytes": 7526480,
+        "queries": 4,
+        "json_bytes": 214065
+      },
+      {
+        "elapsed_ms": 44.848,
+        "peak_python_bytes": 7287337,
+        "queries": 4,
+        "json_bytes": 214065
+      },
+      {
+        "elapsed_ms": 40.771,
+        "peak_python_bytes": 7171993,
+        "queries": 4,
+        "json_bytes": 214065
+      },
+      {
+        "elapsed_ms": 42.326,
+        "peak_python_bytes": 7171761,
+        "queries": 4,
+        "json_bytes": 214065
+      },
+      {
+        "elapsed_ms": 39.588,
+        "peak_python_bytes": 7171985,
+        "queries": 4,
+        "json_bytes": 214065
+      }
+    ],
+    "p50_elapsed_ms": 42.326,
+    "p95_elapsed_ms": 82.35
+  },
+  "streamed_financial_columns": {
+    "samples": [
+      {
+        "elapsed_ms": 41.09,
+        "peak_python_bytes": 1470025,
+        "queries": 4,
+        "json_bytes": 214065
+      },
+      {
+        "elapsed_ms": 34.422,
+        "peak_python_bytes": 1315528,
+        "queries": 4,
+        "json_bytes": 214065
+      },
+      {
+        "elapsed_ms": 34.124,
+        "peak_python_bytes": 1313016,
+        "queries": 4,
+        "json_bytes": 214065
+      },
+      {
+        "elapsed_ms": 34.399,
+        "peak_python_bytes": 1313424,
+        "queries": 4,
+        "json_bytes": 214065
+      },
+      {
+        "elapsed_ms": 34.627,
+        "peak_python_bytes": 1312632,
+        "queries": 4,
+        "json_bytes": 214065
+      }
+    ],
+    "p50_elapsed_ms": 34.422,
+    "p95_elapsed_ms": 41.09
+  },
+  "all_output_fields_equal": true,
+  "output_digest": "68557f04e98a72cb0f0ffa45cb3d7b826fa609168504a85f76d43cff3604215d"
+}

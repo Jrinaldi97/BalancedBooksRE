@@ -2,7 +2,7 @@
 
 from datetime import date
 from typing import Literal, Annotated
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 Id = Annotated[StrictInt, Field(gt=0)]
 Cents = Annotated[StrictInt, Field(ge=0, le=99999999999999)]
@@ -559,6 +559,7 @@ CONTRACTS["correct_posted_party_balance"] = PostedPartyBalanceInput
 
 class ExpectedCorrectionBalance(Input):
     account_id: Id
+    entity_id: Id | None = None
     amount_cents: SignedCents
     property_id: Id | None = None
     unit_id: Id | None = None
@@ -566,12 +567,26 @@ class ExpectedCorrectionBalance(Input):
     counterparty_id: Id | None = None
     item: str | None = None
     party_id: Id | None = None
+    cash_flow: Literal["operating", "investing", "financing", "internal"] | None = None
+
+
+class CorrectionSourceMovement(Input):
+    observation_id: Id
+    account_id: Id
+    date: date
+    amount_cents: SignedCents
+
+
+class CorrectionMovementManifest(Input):
+    kind: Literal["single_bank", "paired_bank", "card_liability"]
+    observations: list[CorrectionSourceMovement] = Field(min_length=1, max_length=2)
 
 
 class ValidateExistingCorrectionInput(Input):
     observation: PostedTransferLeg
     corrective_event_id: Id
     balances: list[ExpectedCorrectionBalance] = Field(min_length=1, max_length=100)
+    movement_manifest: CorrectionMovementManifest | None = None
     evidence: str = Field(min_length=1)
 
 
@@ -582,15 +597,53 @@ class HistoricalShortageResolution(Input):
     review_id: Id
     expected_assessment_digest: str = Field(min_length=1)
     as_of: date
-    corrective_event_id: Id
+    corrective_event_id: Id | None = None
+    corrective_event_ids: list[Id] | None = Field(
+        default=None, min_length=1, max_length=100
+    )
     reason: Literal[
-        "source_allocation_corrected", "import_order_artifact", "supported_restoration"
+        "source_allocation_corrected",
+        "source_allocation_set_corrected",
+        "import_order_artifact",
+        "supported_restoration",
     ]
     evidence: str = Field(min_length=1)
     coverage_evidence: str = Field(min_length=1)
 
+    @model_validator(mode="after")
+    def correction_variant(self):
+        if self.reason == "source_allocation_set_corrected":
+            if self.corrective_event_id is not None or not self.corrective_event_ids:
+                raise ValueError(
+                    "The correction-set variant requires only corrective_event_ids"
+                )
+            if len(set(self.corrective_event_ids)) != len(self.corrective_event_ids):
+                raise ValueError("Correction event identities must be unique")
+            self.corrective_event_ids = sorted(self.corrective_event_ids)
+        elif self.corrective_event_id is None or self.corrective_event_ids is not None:
+            raise ValueError("This variant requires only corrective_event_id")
+        return self
+
 
 CONTRACTS["resolve_historical_shortage"] = HistoricalShortageResolution
+
+
+class ReconciliationSource(Input):
+    document_id: Id
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ReconciliationRevisionInput(Input):
+    supersedes_id: Id
+    expected_reconciliation_digest: str = Field(min_length=1)
+    opening_cents: SignedCents
+    ending_cents: SignedCents
+    observation_ids: list[Id] = Field(max_length=10000)
+    source_documents: list[ReconciliationSource] = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=1)
+
+
+CONTRACTS["revise_reconciliation"] = ReconciliationRevisionInput
 
 
 class LoanFundingResolution(Input):
@@ -603,3 +656,102 @@ class LoanFundingResolution(Input):
 
 
 CONTRACTS["resolve_loan_funding_source"] = LoanFundingResolution
+
+
+class FundingComponent(Input):
+    source_fund_id: Id | None = None
+    own_fund_id: Id | None = None
+    amount_cents: Cents = Field(gt=0)
+    evidence: str = Field(min_length=1)
+
+
+class OutgoingFundingResolution(Input):
+    review_id: Id
+    observation_id: Id
+    obligation_event_id: Id
+    party_id: Id | None = None
+    counterparty_entity_id: Id | None = None
+    item: str = Field(min_length=1, max_length=100)
+    expected_state_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_funding_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    components: list[FundingComponent] = Field(min_length=1, max_length=100)
+    evidence: str = Field(min_length=1)
+
+
+CONTRACTS["resolve_outgoing_funding_source"] = OutgoingFundingResolution
+
+
+from app.portfolio.operations import OperationVerificationInput  # noqa: E402
+
+CONTRACTS["record_operation_verification"] = OperationVerificationInput
+
+
+class OwnerDistributionShare(Input):
+    party_id: Id
+    fund_id: Id
+    ownership_id: Id
+    share_ppm: Annotated[StrictInt, Field(gt=0, le=1000000)]
+    amount_cents: Cents
+
+
+class PostedOwnerDistributionInput(Input):
+    mode: Literal["paired", "receipt_only"]
+    receipt: PostedTransferLeg
+    withdrawal: PostedTransferLeg | None = None
+    sender_entity_id: Id
+    holder_entity_id: Id
+    distribution_date: date
+    distribution_account_id: Id | None = None
+    custody_account_id: Id
+    sender_own_fund_id: Id | None = None
+    code: str = Field(min_length=1, max_length=40)
+    beneficiaries: list[OwnerDistributionShare] = Field(min_length=1, max_length=100)
+    source_evidence: str = Field(min_length=1)
+    funding_evidence: str = Field(min_length=1)
+    coverage_gap: str | None = Field(default=None, min_length=1)
+    evidence: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def source_variant(self):
+        if self.mode == "paired":
+            if (
+                self.withdrawal is None
+                or self.distribution_account_id is None
+                or self.coverage_gap is not None
+            ):
+                raise ValueError(
+                    "Paired mode needs the actual withdrawal and distribution account, without a coverage gap"
+                )
+        elif (
+            self.withdrawal is not None
+            or self.distribution_account_id is not None
+            or self.sender_own_fund_id is not None
+            or not self.coverage_gap
+        ):
+            raise ValueError(
+                "Receipt-only mode needs an explicit coverage gap and must not declare a sender posting"
+            )
+        return self
+
+
+CONTRACTS["correct_posted_owner_distribution_to_holder"] = PostedOwnerDistributionInput
+
+
+class OwnerCustodyPayoutComponent(Input):
+    item_id: Id
+    party_id: Id
+    fund_id: Id
+    amount_cents: Cents = Field(gt=0)
+    expected_item_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    recipient_evidence: str = Field(min_length=1)
+
+
+class PostedOwnerCustodyPayoutInput(Input):
+    observation: PostedTransferLeg
+    components: list[OwnerCustodyPayoutComponent] = Field(min_length=1, max_length=100)
+    evidence: str = Field(min_length=1)
+
+
+CONTRACTS["correct_posted_owner_custody_payout"] = PostedOwnerCustodyPayoutInput
+# Import the module for registration; direct card_schemas imports work as well.
+from app.portfolio import card_schemas as card_schemas  # noqa: E402
