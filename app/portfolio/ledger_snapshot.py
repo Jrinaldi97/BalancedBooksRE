@@ -14,6 +14,8 @@ class LedgerSnapshot:
     All classification/allocation revisions through the maximum cutoff are kept,
     so earlier cutoffs do not accidentally inherit a later effective revision.
     Returned row dictionaries are independent of these retained inputs.
+    Revision reads stream only financial projection fields, excluding evidence
+    prose and ORM instances; retained history is still complete for each scope.
     """
 
     def __init__(
@@ -53,27 +55,41 @@ class LedgerSnapshot:
         scoped_lines = query.with_entities(TransactionLine.id)
         self.classifications = defaultdict(list)
         for row in (
-            db.query(m.CashClassification)
+            db.query(
+                m.CashClassification.line_id,
+                m.CashClassification.date,
+                m.CashClassification.event_id,
+                m.CashClassification.cash_flow,
+            )
             .filter(
                 m.CashClassification.date <= through,
                 m.CashClassification.line_id.in_(scoped_lines),
             )
             .order_by(m.CashClassification.date, m.CashClassification.id)
+            .yield_per(256)
         ):
             self.classifications[row.line_id].append(
                 (row.date, row.event_id, row.cash_flow)
             )
         self.allocations = defaultdict(list)
         for row in (
-            db.query(m.LineAllocation)
+            db.query(
+                m.LineAllocation.line_id,
+                m.LineAllocation.date,
+                m.LineAllocation.event_id,
+                m.LineAllocation.components,
+            )
             .filter(
                 m.LineAllocation.date <= through,
                 m.LineAllocation.line_id.in_(scoped_lines),
             )
             .order_by(m.LineAllocation.date, m.LineAllocation.id)
+            .yield_per(256)
         ):
             self.allocations[row.line_id].append(
-                (row.date, row.event_id, deepcopy(row.components))
+                # Scalar JSON projection decodes a fresh value, independent of
+                # the ORM identity map. Retain it without a second full copy.
+                (row.date, row.event_id, row.components)
             )
         self.rows = []
         for ln, txn, js, dim, sc, acct in query.order_by(

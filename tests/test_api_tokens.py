@@ -1,7 +1,14 @@
 """Scoped API tokens (v2.5.1): issuance, bearer auth, role enforcement,
 no-self-escalation, revocation, and audit attribution."""
 
+from datetime import datetime, timedelta, timezone
+from time import monotonic
+
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, event
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import sessionmaker
 
 from app.main import app
 from app.models.api_tokens import ApiToken
@@ -148,3 +155,99 @@ def test_last_used_recorded(client, db_session):
         db_session.query(ApiToken).filter_by(label="tracked").one().last_used_at
         is not None
     )
+
+
+@pytest.fixture
+def wal_token_store(tmp_path, monkeypatch):
+    import app.database as database
+    from app.services.api_token_service import generate_token, hash_token
+    from app.services.audit import register_audit_hooks
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'token-reads.db'}")
+    database.enable_sqlite_tuning(engine)
+    ApiToken.__table__.create(engine)
+    AuditLog.__table__.create(engine)
+    factory = sessionmaker(bind=engine)
+    register_audit_hooks(factory)
+    monkeypatch.setattr(database, "SessionLocal", factory)
+    bearer = generate_token()
+    with factory() as db:
+        db.add(
+            ApiToken(
+                label="polling",
+                role="readonly",
+                token_hash=hash_token(bearer),
+                token_hint=bearer[:10],
+            )
+        )
+        db.commit()
+
+    # Even commit/rollback must not expose a temporarily changed timeout to
+    # another request taking this connection from the pool.
+    @event.listens_for(engine, "checkin")
+    def check_timeout(connection, _record):
+        if connection is not None:
+            assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+    try:
+        yield engine, factory, bearer
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("previously_used", [False, True])
+def test_token_polling_skips_busy_telemetry_and_recovers(
+    wal_token_store, previously_used
+):
+    from app.services.api_token_service import resolve
+
+    engine, factory, bearer = wal_token_store
+    with factory() as db:
+        row = db.query(ApiToken).one()
+        if previously_used:
+            row.last_used_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+            db.commit()
+        previous = row.last_used_at
+        audit_count = db.query(AuditLog).count()
+
+    with engine.connect() as writer:
+        writer.exec_driver_sql("BEGIN IMMEDIATE")
+        started = monotonic()
+        assert resolve(bearer) == {"label": "polling", "role": "readonly"}
+        assert monotonic() - started < 1.5  # The normal busy timeout is five seconds.
+        with factory() as db:
+            assert db.query(ApiToken).one().last_used_at == previous
+            assert db.query(AuditLog).count() == audit_count
+        writer.rollback()
+
+    assert resolve(bearer) == {"label": "polling", "role": "readonly"}
+    with factory() as db:
+        recorded = db.query(ApiToken).one().last_used_at
+        assert recorded is not None and recorded != previous
+        update = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+        assert update.action == "UPDATE"
+        assert update.changed_fields == ["last_used_at"]
+        assert db.query(AuditLog).count() == audit_count + 1
+    resolve(bearer)
+    with factory() as db:
+        assert db.query(ApiToken).one().last_used_at == recorded
+        assert db.query(AuditLog).count() == audit_count + 1
+        db.query(ApiToken).one().is_active = False
+        db.commit()
+    assert resolve(bearer) is None
+
+
+def test_token_telemetry_propagates_non_lock_errors(wal_token_store):
+    from app.services.api_token_service import resolve
+
+    engine, factory, bearer = wal_token_store
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TRIGGER fail_usage BEFORE UPDATE OF last_used_at ON api_tokens "
+            "BEGIN SELECT missing_sqlite_function(); END"
+        )
+    with pytest.raises(OperationalError, match="no such function"):
+        resolve(bearer)
+    with factory() as db:
+        assert db.query(ApiToken).one().last_used_at is None
+        assert db.query(AuditLog).count() == 1

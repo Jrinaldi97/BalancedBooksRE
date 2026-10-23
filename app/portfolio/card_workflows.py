@@ -517,7 +517,8 @@ def classify_card_purchase(db, data, actor):
 
 def _reciprocal_refund_headroom(db, card, component, refund_date, amount):
     """A backdated refund must leave both real counterparties payable later too."""
-    from app.portfolio.reports import ledger
+    from app.models.transactions import TransactionLine
+    from app.portfolio.ledger_snapshot import LedgerSnapshot
 
     svc = _svc()
     beneficiary = component["entity_id"]
@@ -527,36 +528,56 @@ def _reciprocal_refund_headroom(db, card, component, refund_date, amount):
     )
     for entity_id, role, counterparty_id, sign in scopes:
         account_id = svc.control(db, entity_id, role)
-        for basis in ("accrual", "modified_cash_bank_posting"):
-            changes = defaultdict(int)
-            for row in ledger(db, date.max, account_id=account_id, basis=basis):
-                if row.get("item") != component["item"]:
-                    continue
-                if any(
-                    row.get(key) != expected
-                    for key, expected in (
-                        ("counterparty_id", counterparty_id),
-                        ("property_id", component.get("property_id")),
-                        ("unit_id", component.get("unit_id")),
-                    )
-                ):
-                    svc.fail(
-                        "card_refund_settled",
-                        "The original reciprocal component has changed scope; establish its refund obligation separately",
-                    )
-                changes[row["date"]] += sign * (
-                    row["debit_cents"] - row["credit_cents"]
+        line_ids = db.query(TransactionLine.id).filter_by(account_id=account_id)
+        starts = [refund_date] + sorted(
+            {
+                day
+                for (day,) in db.query(m.LineAllocation.date)
+                .filter(
+                    m.LineAllocation.line_id.in_(line_ids),
+                    m.LineAllocation.date > refund_date,
                 )
-            # Include the refund date even when it has no existing posting.
-            changes[refund_date.isoformat()] += 0
-            running = 0
-            for day, movement in sorted(changes.items()):
-                running += movement
-                if day >= refund_date.isoformat() and running < amount:
-                    svc.fail(
-                        "card_refund_settled",
-                        "Refund exceeds this beneficiary's remaining reciprocal charge on its date or a later recorded date",
+                .distinct()
+            }
+        )
+        ends = [day - timedelta(days=1) for day in starts[1:]] + [date.max]
+        # Reuse complete scoped inputs across effective-date intervals and both
+        # bases; each projection still selects its own historical revisions.
+        packet = LedgerSnapshot(db, date.max, account_id=account_id)
+        for basis in ("accrual", "modified_cash_bank_posting"):
+            # Allocation scopes are constant within each interval. Reconstruct
+            # dated balances using that interval's effective map, never today's
+            # map applied retrospectively to every historical transaction.
+            for start, end in zip(starts, ends):
+                changes = defaultdict(int)
+                for row in packet.project(end, basis=basis):
+                    if row.get("item") != component["item"]:
+                        continue
+                    if any(
+                        row.get(key) != expected
+                        for key, expected in (
+                            ("counterparty_id", counterparty_id),
+                            ("property_id", component.get("property_id")),
+                            ("unit_id", component.get("unit_id")),
+                        )
+                    ):
+                        svc.fail(
+                            "card_refund_settled",
+                            "The original reciprocal component has changed scope; establish its refund obligation separately",
+                        )
+                    changes[row["date"]] += sign * (
+                        row["debit_cents"] - row["credit_cents"]
                     )
+                # Include effective-date boundaries without physical postings.
+                changes[start.isoformat()] += 0
+                running = 0
+                for day, movement in sorted(changes.items()):
+                    running += movement
+                    if day >= start.isoformat() and running < amount:
+                        svc.fail(
+                            "card_refund_settled",
+                            "Refund exceeds this beneficiary's remaining reciprocal charge on its date or a later recorded date",
+                        )
 
 
 def record_card_refund(db, data, actor):

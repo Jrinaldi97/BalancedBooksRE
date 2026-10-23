@@ -11,7 +11,8 @@ import uuid
 from functools import lru_cache
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import func
+from sqlalchemy.orm import aliased, sessionmaker
 from pydantic import Field
 from typing import Literal
 from app.portfolio import models as m, schemas as s, runtime
@@ -263,24 +264,59 @@ def cancel_operation(db, key, actor="operator"):
     return operation_status(db, key)
 
 
-def verification_state(db, key):
-    from app.portfolio.service import values
-
-    rows = (
-        db.query(OperationVerification)
-        .filter_by(key=key)
-        .order_by(OperationVerification.id)
-        .all()
+def _history_rows(db, model, key, compact):
+    query = db.query(model).filter_by(key=key)
+    if not compact:
+        rows = query.order_by(model.id).all()
+        return rows, len(rows)
+    # Most histories fit in one bounded read. Fetch one extra row to determine
+    # whether an indexed count is needed, without decoding old JSON payloads.
+    rows = query.order_by(model.id.desc()).limit(21).all()
+    total = (
+        query.with_entities(func.count(model.id)).scalar()
+        if len(rows) > 20
+        else len(rows)
     )
-    superseded = {row.supersedes_id for row in rows}
-    return {
+    return list(reversed(rows[:20])), total
+
+
+def verification_state(db, key, projection="full"):
+    from app.portfolio.service import values
+    from app.portfolio.reports import read_snapshot
+
+    read_snapshot(db)
+    compact = projection == "compact"
+    rows, total = _history_rows(db, OperationVerification, key, compact)
+    if total > len(rows):
+        # A still-current attestation can predate the history window. Keep it
+        # visible without materializing its entire supersession chain.
+        superseder = aliased(OperationVerification)
+        superseded = (
+            db.query(superseder.id)
+            .filter(
+                superseder.key == key,
+                superseder.supersedes_id == OperationVerification.id,
+            )
+            .exists()
+        )
+        latest = (
+            db.query(OperationVerification)
+            .filter(OperationVerification.key == key, ~superseded)
+            .order_by(OperationVerification.id)
+            .all()
+        )
+    else:
+        superseded_ids = {row.supersedes_id for row in rows}
+        latest = [row for row in rows if row.id not in superseded_ids]
+    result = {
         **runtime.empty_verification(),
-        "external_evidence": "recorded" if rows else "not_recorded",
-        "latest_attestations": [
-            values(row) for row in rows if row.id not in superseded
-        ],
+        "external_evidence": "recorded" if total else "not_recorded",
+        "latest_attestations": [values(row) for row in latest],
         "history": [values(row) for row in rows],
     }
+    if compact:
+        result.update(history_count=total, history_truncated=total > len(rows))
+    return result
 
 
 def operation_status(db, key, projection="full"):
@@ -299,6 +335,9 @@ def operation_status(db, key, projection="full"):
         )
         if row
         else (record.result.get("operation_count", 1) if record else None)
+    )
+    history, history_count = _history_rows(
+        db, OperationTransition, key, projection == "compact"
     )
     result = {
         "key": key,
@@ -324,13 +363,8 @@ def operation_status(db, key, projection="full"):
             )
         ),
         "error": row.error if row else None,
-        "verification": verification_state(db, key),
-        "history": [
-            values(item)
-            for item in db.query(OperationTransition)
-            .filter_by(key=key)
-            .order_by(OperationTransition.id)
-        ],
+        "verification": verification_state(db, key, projection),
+        "history": [values(item) for item in history],
     }
     if record:
         result["result"] = runtime.operation_result(
@@ -340,14 +374,8 @@ def operation_status(db, key, projection="full"):
     if projection == "compact":
         from urllib.parse import urlencode
 
-        result["history_count"] = len(result["history"])
-        result["history"] = result["history"][-20:]
-        result["history_truncated"] = result["history_count"] > 20
-        result["verification"]["history_count"] = len(result["verification"]["history"])
-        result["verification"]["history"] = result["verification"]["history"][-20:]
-        result["verification"]["history_truncated"] = (
-            result["verification"]["history_count"] > 20
-        )
+        result["history_count"] = history_count
+        result["history_truncated"] = history_count > len(history)
         result["projection"] = "compact"
         result["full_result_ref"] = "/api/portfolio/operations?" + urlencode(
             {"key": key}

@@ -1494,7 +1494,7 @@ def test_context_identifies_company_and_command_contract(db_session):
     identity = context(db_session)["connection"]
     assert identity["company_name"] == "Synthetic test company"
     assert identity["command_schema_digest"] == digest(commands())
-    assert identity["portfolio_release"] == "2026.10-evidence-workflows.2"
+    assert identity["portfolio_release"] == "2026.10-evidence-workflows.3"
     assert identity["database_engine"] == "sqlite"
 
 

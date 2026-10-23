@@ -1,5 +1,7 @@
 # Accounting lifecycle and recoverable Codex operations
 
+Follow-up: [0.4.1 efficiency and stability](2026-10-23-efficiency-and-stability.md).
+
 Portfolio release `2026.10-evidence-workflows.2`; local Mac app `0.4.0`, build
 `20261023.1`; upstream base `2.22.3`. Schema `bb0004` adds seven tables for card
 identity/coverage/activity and durable execution/verification history. Upgrade

@@ -175,3 +175,64 @@ def test_shared_batch_uses_one_wal_snapshot(tmp_path, monkeypatch):
         assert reader.get(m.ReviewItem, review_id).detail != original
     assert writes == [True]
     engine.dispose()
+
+
+def test_revision_packet_keeps_same_day_order_and_owned_json(db_session):
+    _, bank, ids = synthetic_observations(db_session, 1)
+    event_id = db_session.get(m.BankObservation, ids[0]).event_id
+    physical = next(
+        row for row in ledger(db_session, date.max) if row["account_id"] == bank
+    )
+    evidence = "Synthetic lengthy evidence retained in its source table. " * 100
+    revisions = []
+    for day, item in (
+        (date(2026, 2, 1), "first"),
+        (date(2026, 2, 1), "same-day-last"),
+        (date(2026, 3, 1), "later"),
+    ):
+        revision = m.LineAllocation(
+            line_id=physical["line_id"],
+            event_id=event_id,
+            date=day,
+            components=[{"amount_cents": 100, "item": item, "cash_flow": "investing"}],
+            evidence=evidence,
+        )
+        revisions.append(revision)
+        db_session.add(revision)
+    db_session.add_all(
+        [
+            m.CashClassification(
+                line_id=physical["line_id"],
+                event_id=event_id,
+                date=date(2026, 1, 15),
+                cash_flow="operating",
+                reason=evidence,
+            ),
+            m.CashClassification(
+                line_id=physical["line_id"],
+                event_id=event_id,
+                date=date(2026, 1, 15),
+                cash_flow="financing",
+                reason=evidence,
+            ),
+        ]
+    )
+    db_session.flush()
+    packet = LedgerSnapshot(db_session, date.max)
+    cutoffs = [date(2026, 1, 2), date(2026, 1, 15), date(2026, 2, 1), date(2026, 3, 1)]
+    expected = {cutoff: baseline_ledger(db_session, cutoff) for cutoff in cutoffs}
+    for cutoff in cutoffs:
+        assert packet.project(cutoff) == expected[cutoff]
+    february = next(
+        row
+        for row in packet.project(date(2026, 2, 1))
+        if row["line_id"] == physical["line_id"]
+    )
+    assert february["item"] == "same-day-last"
+    # Neither an already-loaded ORM JSON object nor returned rows own the
+    # packet's independent decoded values, even after the session goes away.
+    revisions[1].components[0]["item"] = "changed-in-ORM"
+    february["item"] = "changed-in-output"
+    db_session.expunge_all()
+    for cutoff in cutoffs:
+        assert packet.project(cutoff) == expected[cutoff]

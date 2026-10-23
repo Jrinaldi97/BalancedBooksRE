@@ -101,7 +101,7 @@ def context(db: Session = Depends(get_db)):
             "company_file": Path(database).name if database else None,
             "database_engine": db.get_bind().dialect.name,
             "upstream_base_version": __version__,
-            "portfolio_release": "2026.10-evidence-workflows.2",
+            "portfolio_release": "2026.10-evidence-workflows.3",
             "schema_revisions": versions,
             "command_schema_digest": svc.digest(commands()),
             "company_session_id": runtime.company_session_id(db),

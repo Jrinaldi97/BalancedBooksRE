@@ -12,4 +12,4 @@ a=Analysis([str(root/'balancedbooks_launcher.py')],pathex=[str(root)],datas=data
 p=PYZ(a.pure)
 e=EXE(p,a.scripts,exclude_binaries=True,name='BalancedBooksRE',console=False)
 c=COLLECT(e,a.binaries,a.datas,name='BalancedBooksRE')
-app=BUNDLE(c,name='BalancedBooksRE.app',bundle_identifier='com.balancedbooksre.desktop',info_plist={'CFBundleShortVersionString':'0.4.0','CFBundleVersion':'20261023.1','LSMinimumSystemVersion':'14.0','NSHighResolutionCapable':True,'NSDocumentsFolderUsageDescription':'Save accounting statements and exports you request.'})
+app=BUNDLE(c,name='BalancedBooksRE.app',bundle_identifier='com.balancedbooksre.desktop',info_plist={'CFBundleShortVersionString':'0.4.1','CFBundleVersion':'20261023.2','LSMinimumSystemVersion':'14.0','NSHighResolutionCapable':True,'NSDocumentsFolderUsageDescription':'Save accounting statements and exports you request.'})

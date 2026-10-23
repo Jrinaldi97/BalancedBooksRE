@@ -595,3 +595,117 @@ def test_agent_workflow_migration_can_roundtrip_empty_tables(company, monkeypatc
         migration.upgrade()
         migration.upgrade()
         assert names <= set(inspect(connection).get_table_names())
+
+
+def long_operation_history(company, count=250):
+    data = verification_fixture(company)
+    with company[1]() as db:
+        original = ops.record_verification(
+            db,
+            ops.OperationVerificationInput(**{**data, "scope": "source_evidence"}),
+            "reviewer",
+        )
+        previous = None
+        operation = db.get(AgentOperation, data["request_key"])
+        for _ in range(count):
+            ops.transition(db, operation, "committed", {"proof": "x" * 4000})
+            latest = ops.record_verification(
+                db,
+                ops.OperationVerificationInput(
+                    **{
+                        **data,
+                        "scope": "accounting_effects",
+                        "supersedes_id": previous,
+                        "summary": "x" * 4000,
+                    }
+                ),
+                "reviewer",
+            )
+            previous = latest["verification_id"]
+        db.commit()
+    return data, original["verification_id"], previous
+
+
+def test_compact_poll_materializes_bounded_history_and_keeps_old_current_scope(company):
+    from collections import Counter
+    from sqlalchemy import event
+    from app.portfolio.operation_models import OperationTransition
+
+    data, original_id, latest_id = long_operation_history(company)
+    full = read_status(company, data["request_key"])
+    loaded = Counter()
+    with company[1]() as db:
+        event.listen(
+            db,
+            "loaded_as_persistent",
+            lambda session, instance: loaded.update([type(instance)]),
+        )
+        compact = ops.operation_status(db, data["request_key"], "compact")
+    assert loaded[OperationTransition] <= 21
+    assert loaded[OperationVerification] <= 23
+    assert compact["history"] == full["history"][-20:]
+    assert compact["history_count"] == len(full["history"]) == 253
+    assert compact["history_truncated"]
+    verification = compact["verification"]
+    assert verification["history"] == full["verification"]["history"][-20:]
+    assert verification["history_count"] == 251 and verification["history_truncated"]
+    assert (
+        verification["latest_attestations"]
+        == full["verification"]["latest_attestations"]
+    )
+    assert [row["id"] for row in verification["latest_attestations"]] == [
+        original_id,
+        latest_id,
+    ]
+    assert original_id not in {row["id"] for row in verification["history"]}
+    assert compact["result"]["effect_digest"] == full["result"]["effect_digest"]
+    assert compact["result"]["verification"] == verification
+
+
+def test_compact_counts_windows_and_latest_attestations_share_one_snapshot(
+    company, monkeypatch
+):
+    from app.portfolio.operation_models import OperationTransition
+
+    data, original_id, latest_id = long_operation_history(company, count=25)
+    original_reader = ops._history_rows
+    inserted = []
+
+    def concurrent_write(db, model, key, compact):
+        result = original_reader(db, model, key, compact)
+        if model is OperationTransition and not inserted:
+            with company[1]() as writer:
+                ops.transition(writer, writer.get(AgentOperation, key), "committed")
+                amended = ops.record_verification(
+                    writer,
+                    ops.OperationVerificationInput(
+                        **{
+                            **data,
+                            "scope": "source_evidence",
+                            "status": "failed",
+                            "supersedes_id": original_id,
+                        }
+                    ),
+                    "later-reviewer",
+                )
+                writer.commit()
+                inserted.append(amended["verification_id"])
+        return result
+
+    monkeypatch.setattr(ops, "_history_rows", concurrent_write)
+    with company[1]() as db:
+        prior = ops.operation_status(db, data["request_key"], "compact")
+        assert prior["history_count"] == 28
+        assert prior["verification"]["history_count"] == 26
+        assert [row["id"] for row in prior["verification"]["latest_attestations"]] == [
+            original_id,
+            latest_id,
+        ]
+        db.rollback()
+        current = ops.operation_status(db, data["request_key"], "compact")
+        assert current["history_count"] == 29
+        assert current["verification"]["history_count"] == 27
+        assert [
+            row["id"] for row in current["verification"]["latest_attestations"]
+        ] == [latest_id, inserted[0]]
+        assert current["verification"]["latest_attestations"][-1]["status"] == "failed"

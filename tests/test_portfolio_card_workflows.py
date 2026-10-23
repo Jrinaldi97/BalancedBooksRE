@@ -1095,3 +1095,128 @@ def test_backdated_refund_keeps_later_partially_settled_reciprocal_balance_nonne
     for basis in ("accrual", "modified_cash_bank_posting"):
         assert basis_total(db, control(db, cards["holder"], "due_from"), basis) == 500
         assert basis_total(db, control(db, cards["borrower"], "due_to"), basis) == -500
+
+
+@pytest.mark.parametrize("allocation_day", ["2026-02-03", "2026-02-11", "2026-03-01"])
+def test_refund_headroom_respects_allocation_effective_dates(cards, allocation_day):
+    db = cards["db"]
+    _, _, charge = purchase(cards)
+    original_item = "card:PURCHASE:entity"
+    scopes = (
+        (cards["holder"], "due_from", cards["borrower"], 1),
+        (cards["borrower"], "due_to", cards["holder"], -1),
+    )
+    unrelated = run(
+        db,
+        "post",
+        date="2026-01-15",
+        description="Separate reciprocal charge",
+        rationale="This charge originally belongs to another item",
+        journals=[
+            {
+                "entity_id": entity_id,
+                "lines": [
+                    ln(
+                        control(db, entity_id, role),
+                        sign * 1000,
+                        item="unrelated",
+                        counterparty_id=counterparty,
+                    ),
+                    ln(control(db, entity_id, "equity"), -sign * 1000),
+                ],
+            }
+            for entity_id, role, counterparty, sign in scopes
+        ],
+    )
+    run(
+        db,
+        "post",
+        date="2026-02-10",
+        description="Full original settlement",
+        rationale="Beneficiary settled the exact original charge",
+        journals=[
+            {
+                "entity_id": entity_id,
+                "lines": [
+                    ln(
+                        control(db, entity_id, role),
+                        -sign * 3000,
+                        item=original_item,
+                        counterparty_id=counterparty,
+                    ),
+                    ln(control(db, entity_id, "equity"), sign * 3000),
+                ],
+            }
+            for entity_id, role, counterparty, sign in scopes
+        ],
+    )
+    marker = journal(
+        db,
+        cards["holder"],
+        allocation_day,
+        [ln(cards["expense"], 1), ln(control(db, cards["holder"], "equity"), -1)],
+    )
+    for row in ledger(db, date.max, event_ids=[unrelated["event_id"]]):
+        if row["role"] not in {"due_from", "due_to"}:
+            continue
+        db.add(
+            m.LineAllocation(
+                line_id=row["line_id"],
+                event_id=marker["event_id"],
+                date=date.fromisoformat(allocation_day),
+                components=[
+                    {
+                        **{
+                            key: row.get(key)
+                            for key in (
+                                "property_id",
+                                "unit_id",
+                                "fund_id",
+                                "counterparty_id",
+                                "cash_flow",
+                            )
+                        },
+                        "item": original_item,
+                        "amount_cents": row["debit_cents"] - row["credit_cents"],
+                    }
+                ],
+                evidence="Allocation applies only from its explicit effective date",
+            )
+        )
+    db.flush()
+    due_from = control(db, cards["holder"], "due_from")
+    supported = allocation_day == "2026-02-03"
+    assert balance(db, due_from, date(2026, 2, 10), item=original_item) == (
+        1000 if supported else 0
+    )
+    assert balance(db, due_from, date(2026, 3, 1), item=original_item) == 1000
+    refund = issuer_rows(
+        cards,
+        [
+            {
+                "date": "2026-02-03",
+                "amount_cents": 500,
+                "external_id": "historical-allocation-refund",
+            }
+        ],
+    )["observation_ids"][0]
+    events = db.query(m.Event).count()
+    data = dict(
+        code="HISTORICAL-ALLOCATION",
+        card_id=cards["card"],
+        observation=reference(db, refund),
+        purchase_id=charge["card_activity_id"],
+        components=[{"key": "entity", "amount_cents": 500}],
+        evidence="Late issuer refund cannot borrow future allocation",
+    )
+    if supported:
+        run(db, "record_card_refund", **data)
+        assert balance(db, due_from, date(2026, 2, 10), item=original_item) == 500
+        assert db.get(m.BankObservation, refund).event_id is not None
+    else:
+        with pytest.raises(Problem) as error:
+            run(db, "record_card_refund", **data)
+        assert error.value.code == "card_refund_settled"
+        assert db.query(m.Event).count() == events
+        assert db.get(m.BankObservation, refund).event_id is None
+        assert balance(db, due_from, date(2026, 2, 10), item=original_item) == 0
