@@ -260,6 +260,25 @@ class Reconciliation(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class ReconciliationRevision(Base):
+    """An immutable reviewed replacement, never a rewrite of a bank snapshot."""
+
+    __tablename__ = "re_reconciliation_revisions"
+    __table_args__ = (CheckConstraint("supersedes_id <> replacement_id"),)
+    id = Column(Integer, primary_key=True)
+    supersedes_id = Column(
+        Integer, ForeignKey("re_reconciliations.id"), unique=True, nullable=False
+    )
+    replacement_id = Column(
+        Integer, ForeignKey("re_reconciliations.id"), unique=True, nullable=False
+    )
+    reason = Column(Text, nullable=False)
+    source_documents = Column(JSON, nullable=False)
+    previous_digest = Column(String(64), nullable=False)
+    actor = Column(String(200), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class Schedule(Base):
     __tablename__ = "re_schedules"
     id = Column(Integer, primary_key=True)

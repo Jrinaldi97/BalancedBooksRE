@@ -1,0 +1,439 @@
+{
+  "scope": "Fresh synthetic SQLite; ORM-cold repeated samples; serialization included; no network or production timing claims",
+  "parameters": {
+    "observations": 300,
+    "overrides_per_observation": 20,
+    "repeats": 5
+  },
+  "scoped_overrides": {
+    "baseline_all_rows": {
+      "samples": [
+        {
+          "elapsed_ms": 50.871,
+          "sql_ms": 1.213,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 11568439
+        },
+        {
+          "elapsed_ms": 91.812,
+          "sql_ms": 1.429,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 11298275
+        },
+        {
+          "elapsed_ms": 46.805,
+          "sql_ms": 1.27,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 11399723
+        },
+        {
+          "elapsed_ms": 83.973,
+          "sql_ms": 1.261,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 11336947
+        },
+        {
+          "elapsed_ms": 47.168,
+          "sql_ms": 1.305,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 11399723
+        }
+      ],
+      "p50_elapsed_ms": 50.871,
+      "p95_elapsed_ms": 91.812
+    },
+    "scoped_rows": {
+      "samples": [
+        {
+          "elapsed_ms": 1.144,
+          "sql_ms": 0.077,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 62298
+        },
+        {
+          "elapsed_ms": 0.438,
+          "sql_ms": 0.018,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 43141
+        },
+        {
+          "elapsed_ms": 0.381,
+          "sql_ms": 0.014,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 42973
+        },
+        {
+          "elapsed_ms": 0.366,
+          "sql_ms": 0.013,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 41789
+        },
+        {
+          "elapsed_ms": 0.354,
+          "sql_ms": 0.012,
+          "queries": 1,
+          "json_bytes": 48,
+          "peak_python_bytes": 41789
+        }
+      ],
+      "p50_elapsed_ms": 0.381,
+      "p95_elapsed_ms": 1.144
+    },
+    "output_digest": "3104c9d60174b588263f75cca122a1d9cd776c14131e70cd7574db5c8eca3ecf",
+    "equivalent": true,
+    "baseline_rows": 6000,
+    "scoped_rows_loaded": 20
+  },
+  "observation_states": {
+    "1": {
+      "full": {
+        "samples": [
+          {
+            "elapsed_ms": 20.024,
+            "sql_ms": 0.529,
+            "queries": 17,
+            "json_bytes": 2569,
+            "peak_python_bytes": 559364
+          },
+          {
+            "elapsed_ms": 7.387,
+            "sql_ms": 0.169,
+            "queries": 16,
+            "json_bytes": 2569,
+            "peak_python_bytes": 98292
+          },
+          {
+            "elapsed_ms": 7.183,
+            "sql_ms": 0.172,
+            "queries": 16,
+            "json_bytes": 2569,
+            "peak_python_bytes": 98912
+          },
+          {
+            "elapsed_ms": 7.367,
+            "sql_ms": 0.174,
+            "queries": 16,
+            "json_bytes": 2569,
+            "peak_python_bytes": 96132
+          },
+          {
+            "elapsed_ms": 6.674,
+            "sql_ms": 0.167,
+            "queries": 16,
+            "json_bytes": 2569,
+            "peak_python_bytes": 96600
+          }
+        ],
+        "p50_elapsed_ms": 7.367,
+        "p95_elapsed_ms": 20.024
+      },
+      "compact": {
+        "samples": [
+          {
+            "elapsed_ms": 6.873,
+            "sql_ms": 0.156,
+            "queries": 16,
+            "json_bytes": 2391,
+            "peak_python_bytes": 96760
+          },
+          {
+            "elapsed_ms": 6.649,
+            "sql_ms": 0.151,
+            "queries": 16,
+            "json_bytes": 2391,
+            "peak_python_bytes": 85316
+          },
+          {
+            "elapsed_ms": 6.859,
+            "sql_ms": 0.153,
+            "queries": 16,
+            "json_bytes": 2391,
+            "peak_python_bytes": 97000
+          },
+          {
+            "elapsed_ms": 6.979,
+            "sql_ms": 0.161,
+            "queries": 16,
+            "json_bytes": 2391,
+            "peak_python_bytes": 95956
+          },
+          {
+            "elapsed_ms": 6.67,
+            "sql_ms": 0.152,
+            "queries": 16,
+            "json_bytes": 2391,
+            "peak_python_bytes": 97112
+          }
+        ],
+        "p50_elapsed_ms": 6.859,
+        "p95_elapsed_ms": 6.979
+      },
+      "financial_and_digest_parity": true
+    },
+    "30": {
+      "full": {
+        "samples": [
+          {
+            "elapsed_ms": 217.702,
+            "sql_ms": 4.91,
+            "queries": 480,
+            "json_bytes": 69616,
+            "peak_python_bytes": 431679
+          },
+          {
+            "elapsed_ms": 215.889,
+            "sql_ms": 4.983,
+            "queries": 480,
+            "json_bytes": 69616,
+            "peak_python_bytes": 411866
+          },
+          {
+            "elapsed_ms": 248.694,
+            "sql_ms": 5.09,
+            "queries": 480,
+            "json_bytes": 69616,
+            "peak_python_bytes": 437591
+          },
+          {
+            "elapsed_ms": 215.779,
+            "sql_ms": 4.989,
+            "queries": 480,
+            "json_bytes": 69616,
+            "peak_python_bytes": 438354
+          },
+          {
+            "elapsed_ms": 216.649,
+            "sql_ms": 5.035,
+            "queries": 480,
+            "json_bytes": 69616,
+            "peak_python_bytes": 464379
+          }
+        ],
+        "p50_elapsed_ms": 216.649,
+        "p95_elapsed_ms": 248.694
+      },
+      "compact": {
+        "samples": [
+          {
+            "elapsed_ms": 218.443,
+            "sql_ms": 5.036,
+            "queries": 480,
+            "json_bytes": 64167,
+            "peak_python_bytes": 494295
+          },
+          {
+            "elapsed_ms": 218.083,
+            "sql_ms": 5.106,
+            "queries": 480,
+            "json_bytes": 64167,
+            "peak_python_bytes": 430833
+          },
+          {
+            "elapsed_ms": 218.372,
+            "sql_ms": 5.021,
+            "queries": 480,
+            "json_bytes": 64167,
+            "peak_python_bytes": 427390
+          },
+          {
+            "elapsed_ms": 217.93,
+            "sql_ms": 5.218,
+            "queries": 480,
+            "json_bytes": 64167,
+            "peak_python_bytes": 462270
+          },
+          {
+            "elapsed_ms": 217.236,
+            "sql_ms": 5.179,
+            "queries": 480,
+            "json_bytes": 64167,
+            "peak_python_bytes": 422091
+          }
+        ],
+        "p50_elapsed_ms": 218.083,
+        "p95_elapsed_ms": 218.443
+      },
+      "financial_and_digest_parity": true
+    },
+    "100": {
+      "full": {
+        "samples": [
+          {
+            "elapsed_ms": 746.792,
+            "sql_ms": 18.93,
+            "queries": 1600,
+            "json_bytes": 231952,
+            "peak_python_bytes": 1329724
+          },
+          {
+            "elapsed_ms": 756.623,
+            "sql_ms": 19.286,
+            "queries": 1600,
+            "json_bytes": 231952,
+            "peak_python_bytes": 1232457
+          },
+          {
+            "elapsed_ms": 759.14,
+            "sql_ms": 19.853,
+            "queries": 1600,
+            "json_bytes": 231952,
+            "peak_python_bytes": 1181311
+          },
+          {
+            "elapsed_ms": 739.687,
+            "sql_ms": 18.448,
+            "queries": 1600,
+            "json_bytes": 231952,
+            "peak_python_bytes": 1152251
+          },
+          {
+            "elapsed_ms": 742.801,
+            "sql_ms": 18.761,
+            "queries": 1600,
+            "json_bytes": 231952,
+            "peak_python_bytes": 1277302
+          }
+        ],
+        "p50_elapsed_ms": 746.792,
+        "p95_elapsed_ms": 759.14
+      },
+      "compact": {
+        "samples": [
+          {
+            "elapsed_ms": 748.031,
+            "sql_ms": 18.754,
+            "queries": 1600,
+            "json_bytes": 213761,
+            "peak_python_bytes": 1177065
+          },
+          {
+            "elapsed_ms": 751.234,
+            "sql_ms": 18.746,
+            "queries": 1600,
+            "json_bytes": 213761,
+            "peak_python_bytes": 1176921
+          },
+          {
+            "elapsed_ms": 757.254,
+            "sql_ms": 19.309,
+            "queries": 1600,
+            "json_bytes": 213761,
+            "peak_python_bytes": 1109876
+          },
+          {
+            "elapsed_ms": 750.091,
+            "sql_ms": 18.578,
+            "queries": 1600,
+            "json_bytes": 213761,
+            "peak_python_bytes": 1119847
+          },
+          {
+            "elapsed_ms": 752.086,
+            "sql_ms": 18.671,
+            "queries": 1600,
+            "json_bytes": 213761,
+            "peak_python_bytes": 1126516
+          }
+        ],
+        "p50_elapsed_ms": 751.234,
+        "p95_elapsed_ms": 757.254
+      },
+      "financial_and_digest_parity": true
+    },
+    "200": {
+      "full": {
+        "samples": [
+          {
+            "elapsed_ms": 1505.611,
+            "sql_ms": 41.955,
+            "queries": 3200,
+            "json_bytes": 465252,
+            "peak_python_bytes": 2398383
+          },
+          {
+            "elapsed_ms": 1511.135,
+            "sql_ms": 42.003,
+            "queries": 3200,
+            "json_bytes": 465252,
+            "peak_python_bytes": 2359163
+          },
+          {
+            "elapsed_ms": 1518.015,
+            "sql_ms": 41.775,
+            "queries": 3200,
+            "json_bytes": 465252,
+            "peak_python_bytes": 2365867
+          },
+          {
+            "elapsed_ms": 1498.424,
+            "sql_ms": 40.638,
+            "queries": 3200,
+            "json_bytes": 465252,
+            "peak_python_bytes": 2314354
+          },
+          {
+            "elapsed_ms": 1489.777,
+            "sql_ms": 38.57,
+            "queries": 3200,
+            "json_bytes": 465252,
+            "peak_python_bytes": 2308770
+          }
+        ],
+        "p50_elapsed_ms": 1505.611,
+        "p95_elapsed_ms": 1518.015
+      },
+      "compact": {
+        "samples": [
+          {
+            "elapsed_ms": 1549.436,
+            "sql_ms": 39.184,
+            "queries": 3200,
+            "json_bytes": 428761,
+            "peak_python_bytes": 2268454
+          },
+          {
+            "elapsed_ms": 1518.633,
+            "sql_ms": 41.371,
+            "queries": 3200,
+            "json_bytes": 428761,
+            "peak_python_bytes": 2526102
+          },
+          {
+            "elapsed_ms": 1531.987,
+            "sql_ms": 41.643,
+            "queries": 3200,
+            "json_bytes": 428761,
+            "peak_python_bytes": 2380965
+          },
+          {
+            "elapsed_ms": 1537.875,
+            "sql_ms": 42.147,
+            "queries": 3200,
+            "json_bytes": 428761,
+            "peak_python_bytes": 2240372
+          },
+          {
+            "elapsed_ms": 1522.984,
+            "sql_ms": 41.545,
+            "queries": 3200,
+            "json_bytes": 428761,
+            "peak_python_bytes": 2225015
+          }
+        ],
+        "p50_elapsed_ms": 1531.987,
+        "p95_elapsed_ms": 1549.436
+      },
+      "financial_and_digest_parity": true
+    }
+  },
+  "code_context": "Runtime changes on f892f98e27795e0fde33431124d06d58e4815d15 before integration of other handoff features; not a final packaged-release benchmark."
+}

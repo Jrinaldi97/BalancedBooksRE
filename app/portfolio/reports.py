@@ -49,10 +49,17 @@ def ledger(
         query = query.filter(m.JournalScope.entity_id.in_(entity_ids))
     if account_id:
         query = query.filter(Account.id == account_id)
+    # Keep date ordering identical while restricting override reads to this
+    # ledger's actual line scope. The subquery avoids SQLite parameter limits
+    # and includes pre-allocation lines before property filtering.
+    scoped_line_ids = query.with_entities(TransactionLine.id)
     overrides = {
         x.line_id: x
         for x in db.query(m.CashClassification)
-        .filter(m.CashClassification.date <= end)
+        .filter(
+            m.CashClassification.date <= end,
+            m.CashClassification.line_id.in_(scoped_line_ids),
+        )
         .order_by(m.CashClassification.date, m.CashClassification.id)
     }
     rows = []
@@ -610,40 +617,51 @@ def overview(db, start, end, entity_id=None, property_id=None, bank_id=None):
 
 def event_detail(db, ident):
     event = get(db, m.Event, ident)
-    journals = db.query(m.JournalScope).filter_by(event_id=ident).all()
-    lines = []
-    for journal in journals:
-        for ln in db.query(TransactionLine).filter_by(
-            transaction_id=journal.transaction_id
-        ):
-            dim = get(db, m.LineScope, ln.id)
-            lines.append(
-                {
-                    "line_id": ln.id,
-                    "entity_id": journal.entity_id,
-                    "account_id": ln.account_id,
-                    "account_name": get(db, Account, ln.account_id).name,
-                    "debit_cents": cents(ln.debit),
-                    "credit_cents": cents(ln.credit),
-                    **values(dim),
-                }
+    lines = [
+        {
+            "line_id": ln.id,
+            "entity_id": journal.entity_id,
+            "account_id": ln.account_id,
+            "account_name": acct.name,
+            "debit_cents": cents(ln.debit),
+            "credit_cents": cents(ln.credit),
+            **values(dim),
+        }
+        for ln, journal, dim, acct in db.query(
+            TransactionLine, m.JournalScope, m.LineScope, Account
+        )
+        .join(
+            m.JournalScope,
+            m.JournalScope.transaction_id == TransactionLine.transaction_id,
+        )
+        .join(m.LineScope, m.LineScope.line_id == TransactionLine.id)
+        .join(Account, Account.id == TransactionLine.account_id)
+        .filter(m.JournalScope.event_id == ident)
+        .order_by(m.JournalScope.transaction_id, TransactionLine.id)
+    ]
+    document_rows = (
+        db.query(m.DocumentLink, m.Document)
+        .join(m.Document, m.Document.id == m.DocumentLink.document_id)
+        .filter(m.DocumentLink.event_id == ident)
+        .order_by(m.DocumentLink.id)
+        .all()
+    )
+    locations = defaultdict(list)
+    # A scoped join avoids per-document reads and large IN parameter lists.
+    for location in (
+        db.query(m.DocumentLocation)
+        .filter(
+            m.DocumentLocation.document_id.in_(
+                db.query(m.DocumentLink.document_id).filter_by(event_id=ident)
             )
-    links = []
-    for link in db.query(m.DocumentLink).filter_by(event_id=ident):
-        doc = get(db, m.Document, link.document_id)
-        locations = (
-            db.query(m.DocumentLocation)
-            .filter_by(document_id=doc.id)
-            .order_by(m.DocumentLocation.id)
-            .all()
         )
-        links.append(
-            {
-                "document": values(doc),
-                "page": link.page,
-                "locations": [values(x) for x in locations],
-            }
-        )
+        .order_by(m.DocumentLocation.id)
+    ):
+        locations[location.document_id].append(values(location))
+    links = [
+        {"document": values(doc), "page": link.page, "locations": locations[doc.id]}
+        for link, doc in document_rows
+    ]
     return {
         "event": values(event),
         "lines": lines,

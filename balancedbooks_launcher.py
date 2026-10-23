@@ -58,7 +58,7 @@ def prepare(data_dir, filename=None):
         FORCE_HTTPS="false",
         APP_HOST="127.0.0.1",
         SLOWBOOKS_DESKTOP="1",
-        APP_VERSION="0.2.1",
+        APP_VERSION="0.3.0",
     )
     from dotenv import load_dotenv
 

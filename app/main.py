@@ -347,6 +347,7 @@ def _create_missing_tables() -> None:
     Base.metadata.create_all(bind=engine)
     if engine.dialect.name == "sqlite":
         from app.portfolio.guards import install
+
         with engine.begin() as connection:
             install(connection)
 
@@ -1002,7 +1003,8 @@ app.add_middleware(
 )
 
 # Phase 9.7: Auth routes MUST be included (they're exempt from the session gate)
-from app.portfolio.routes import router as portfolio_router
+from app.portfolio.routes import router as portfolio_router  # noqa: E402
+
 app.include_router(portfolio_router)
 app.include_router(auth_routes.router)
 

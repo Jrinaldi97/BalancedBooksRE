@@ -8,6 +8,12 @@ from app.portfolio.allocations import DIMENSIONS
 from app.portfolio.service import get, values, digest
 from app.portfolio.reports import ledger, read_snapshot
 
+SOURCE_MOVEMENT_KINDS = {
+    "bank": "bank_cash",
+    "credit_card": "card_liability",
+    "bridge": "clearing_transit",
+}
+
 
 def observation_state(db, observation_id, through=None):
     read_snapshot(db)
@@ -34,26 +40,31 @@ def observation_state(db, observation_id, through=None):
     )
     # A coordinated correction is assessed with all explicitly linked original
     # legs, so its paired clearing lines are never mistaken for new suspense.
-    source_ids = {
-        ident
-        for event in roots
-        for ident in (event.source or {}).get("source_event_ids", [])
-        if isinstance(ident, int)
-    }
-    if source_ids:
-        roots.extend(db.query(m.Event).filter(m.Event.id.in_(source_ids)).all())
     events = {event.id: event for event in roots}
     frontier = set(events)
     while frontier:
-        children = db.query(m.Event).filter(m.Event.corrects_id.in_(frontier)).all()
+        source_ids = {
+            ident
+            for event_id in frontier
+            for ident in (events[event_id].source or {}).get("source_event_ids", [])
+            if type(ident) is int and ident > 0
+        } - events.keys()
+        children = (
+            db.query(m.Event)
+            .filter(or_(m.Event.corrects_id.in_(frontier), m.Event.id.in_(source_ids)))
+            .all()
+        )
         frontier = {event.id for event in children} - events.keys()
         events.update({event.id: event for event in children})
     active = sorted(event.id for event in events.values() if event.date <= through)
     residuals = {}
     cash = defaultdict(int)
+    movements = defaultdict(int)
+    rows_by_basis = {}
     for basis in ("accrual", "modified_cash_bank_posting"):
         totals = defaultdict(int)
-        for row in ledger(db, through, basis=basis, event_ids=active):
+        rows_by_basis[basis] = ledger(db, through, basis=basis, event_ids=active)
+        for row in rows_by_basis[basis]:
             amount = row["debit_cents"] - row["credit_cents"]
             if row["role"].startswith("suspense"):
                 key = (
@@ -64,6 +75,15 @@ def observation_state(db, observation_id, through=None):
                 totals[key] += amount
             if basis == "accrual" and row["role"] == "bank":
                 cash[(row["account_id"], row["date"])] += amount
+            if basis == "accrual" and row["role"] in SOURCE_MOVEMENT_KINDS:
+                movements[
+                    (
+                        SOURCE_MOVEMENT_KINDS[row["role"]],
+                        row["event_id"],
+                        row["account_id"],
+                        row["date"],
+                    )
+                ] += amount
         residuals[basis] = [
             {
                 "entity_id": key[0],
@@ -90,6 +110,40 @@ def observation_state(db, observation_id, through=None):
             for key, amount in sorted(cash.items())
             if amount
         ],
+        # These distinguish liability and transit activity from bank cash. The
+        # immutable originals remain explicit even when two legs net to zero.
+        "source_observations": [
+            {
+                "observation_id": original.id,
+                "event_id": original.event_id,
+                "kind": SOURCE_MOVEMENT_KINDS[account.role],
+                "account_id": original.account_id,
+                "date": original.date.isoformat(),
+                "amount_cents": original.amount_cents,
+            }
+            for original, account in db.query(m.BankObservation, m.AccountScope)
+            .join(
+                m.AccountScope,
+                m.AccountScope.account_id == m.BankObservation.account_id,
+            )
+            .filter(m.BankObservation.event_id.in_(active))
+            .order_by(m.BankObservation.id)
+            if account.role in SOURCE_MOVEMENT_KINDS
+        ],
+        "source_movements": [
+            {
+                "kind": key[0],
+                "event_id": key[1],
+                "account_id": key[2],
+                "date": key[3],
+                "amount_cents": amount,
+            }
+            for key, amount in sorted(movements.items())
+            if amount
+        ],
+        # Bind the caller's state guard to the complete effective economics,
+        # including non-suspense allocation and basis changes.
+        "effective_ledger_digest": digest(rows_by_basis),
         "reviews": reviews,
         "scope": "Explicit observation references and correction descendants; unrelated journals are not inferred.",
     }

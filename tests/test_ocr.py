@@ -728,6 +728,24 @@ def test_parse_merchant_skips_ocr_noise_lines():
     assert conf == "low"
 
 
+def test_tesseract_probe_skips_inaccessible_optional_installation(
+    tmp_path, monkeypatch
+):
+    class Inaccessible:
+        def is_file(self):
+            raise PermissionError("Installation directory is not accessible")
+
+    binary = tmp_path / "tesseract"
+    binary.write_text("synthetic executable")
+    monkeypatch.setattr(ocr_service.shutil, "which", lambda _: None)
+    monkeypatch.setattr(
+        ocr_service, "_tesseract_candidates", lambda: [Inaccessible(), binary]
+    )
+    assert ocr_service.tesseract_cmd() == str(binary)
+    monkeypatch.setattr(ocr_service, "_tesseract_candidates", lambda: [Inaccessible()])
+    assert ocr_service.tesseract_cmd() is None
+
+
 def test_tesseract_cmd_falls_back_to_stock_install_dir(tmp_path, monkeypatch):
     """The UB Mannheim Windows installer (and Homebrew on a macOS GUI app)
     leave tesseract off PATH; the resolver checks the stock locations."""

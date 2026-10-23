@@ -19,6 +19,7 @@ from app.database import get_db
 from app.models.accounts import Account
 from app.portfolio import models as m, schemas as s, service as svc, reports
 from app.portfolio.imports import parse_bank
+from app.portfolio import runtime
 
 router = APIRouter(prefix="/api/portfolio", tags=["BalancedBooksRE"])
 
@@ -91,9 +92,18 @@ def context(db: Session = Depends(get_db)):
             "company_file": Path(database).name if database else None,
             "database_engine": db.get_bind().dialect.name,
             "upstream_base_version": __version__,
-            "portfolio_release": "2026.10-pooled-corrections.2",
+            "portfolio_release": "2026.10-evidence-workflows.1",
             "schema_revisions": versions,
             "command_schema_digest": svc.digest(commands()),
+            "company_session_id": runtime.company_session_id(db),
+            "build": runtime.BUILD_IDENTITY,
+        },
+        "agent_contract": {
+            "observation_states_max_ids": 200,
+            "projections": ["full", "compact"],
+            "mutation_preconditions": runtime.ConnectionExpectation.model_json_schema(),
+            "request_status": "Committed results only; an absent key does not prove a request is not running.",
+            "external_verification_attestations": False,
         },
         "product": "BalancedBooksRE",
         "interface_version": "1",
@@ -135,26 +145,51 @@ def commands():
 
 
 @router.post("/commands")
-def command(payload: s.Command, request: Request, db: Session = Depends(get_db)):
+def command(
+    payload: runtime.CommandInput,
+    request: Request,
+    projection: runtime.Projection = "full",
+    db: Session = Depends(get_db),
+):
     admin_operation(request, payload.operation)
     try:
         serialize_write(db)
-        result = svc.execute(db, payload, actor(db))
+        runtime.check_connection(
+            db, payload.expected_connection, lambda: svc.digest(commands())
+        )
+        result = svc.execute(
+            db, payload.model_dump(exclude={"expected_connection"}), actor(db)
+        )
         db.commit()
-        return result
+        return runtime.operation_result(result, projection=projection)
     except (svc.Problem, ValidationError, IntegrityError) as exc:
         db.rollback()
         raise error(exc) from exc
 
 
 @router.post("/proposals")
-def propose(payload: s.Command, request: Request, db: Session = Depends(get_db)):
+def propose(
+    payload: runtime.CommandInput,
+    request: Request,
+    projection: runtime.Projection = "full",
+    db: Session = Depends(get_db),
+):
     admin_operation(request, payload.operation)
     try:
         serialize_write(db)
+        runtime.check_connection(
+            db, payload.expected_connection, lambda: svc.digest(commands())
+        )
         revisions = {str(e.id): e.revision for e in db.query(m.Entity)}
+        command_data = payload.model_dump(mode="json", exclude={"expected_connection"})
         with db.begin_nested() as trial:
-            result = svc.execute(db, payload, actor(db))
+            result = svc.execute(db, command_data, actor(db))
+            if result.get("replayed"):
+                raise svc.Problem(
+                    "already_committed",
+                    "This key already committed; recover its actual result with request_result instead of preparing another preview",
+                    {"key": payload.key, "required_action": "request_result"},
+                )
             ids = result.get(
                 "event_ids", ([result["event_id"]] if "event_id" in result else [])
             )
@@ -175,7 +210,11 @@ def propose(payload: s.Command, request: Request, db: Session = Depends(get_db))
                     mark_preview(child)
 
         mark_preview(preview["result"])
-        data = payload.model_dump(mode="json")
+        data = dict(command_data)
+        if payload.expected_connection is not None:
+            data["expected_connection"] = payload.expected_connection.model_dump(
+                exclude_none=True
+            )
         hashed = svc.digest(
             {"request": data, "revisions": revisions, "preview": preview}
         )
@@ -184,45 +223,64 @@ def propose(payload: s.Command, request: Request, db: Session = Depends(get_db))
         )
         db.add(row)
         db.commit()
-        return {
-            "proposal_id": row.id,
-            "digest": hashed,
-            "preview": preview,
-            "committed": False,
-        }
+        return runtime.proposal_result(row, projection)
     except (svc.Problem, ValidationError, IntegrityError) as exc:
         db.rollback()
         raise error(exc) from exc
 
 
-class CommitInput(s.Input):
-    digest: str
+CommitInput = runtime.CommitInput
 
 
 @router.post("/proposals/{ident}/commit")
 def commit(
-    ident: int, payload: CommitInput, request: Request, db: Session = Depends(get_db)
+    ident: int,
+    payload: CommitInput,
+    request: Request,
+    projection: runtime.Projection = "full",
+    db: Session = Depends(get_db),
 ):
     try:
         serialize_write(db)
+        runtime.check_connection(
+            db, payload.expected_connection, lambda: svc.digest(commands())
+        )
         proposal = svc.get(db, m.Proposal, ident)
+        saved_request = runtime.CommandInput.model_validate(proposal.request)
+        runtime.check_connection(
+            db, saved_request.expected_connection, lambda: svc.digest(commands())
+        )
         admin_operation(request, proposal.request["operation"])
         if proposal.digest != payload.digest:
             svc.fail("preview_conflict", "Preview digest does not match")
         if proposal.committed_result:
-            return {**proposal.committed_result, "replayed": True}
+            return runtime.operation_result(
+                {**proposal.committed_result, "replayed": True}, projection=projection
+            )
         revisions = {str(e.id): e.revision for e in db.query(m.Entity)}
         if revisions != proposal.revisions:
             svc.fail(
                 "stale_proposal",
                 "Books changed after this preview; prepare a new proposal",
             )
-        result = svc.execute(db, proposal.request, actor(db))
+        result = svc.execute(
+            db, saved_request.model_dump(exclude={"expected_connection"}), actor(db)
+        )
         proposal.committed_result = result
         db.commit()
-        return result
+        return runtime.operation_result(result, projection=projection)
     except (svc.Problem, ValidationError, IntegrityError) as exc:
         db.rollback()
+        raise error(exc) from exc
+
+
+@router.get("/proposals/{ident}")
+def proposal_detail(
+    ident: int, projection: runtime.Projection = "full", db: Session = Depends(get_db)
+):
+    try:
+        return runtime.proposal_result(svc.get(db, m.Proposal, ident), projection)
+    except svc.Problem as exc:
         raise error(exc) from exc
 
 
@@ -291,9 +349,12 @@ def save_statements(
 
 
 @router.get("/events/{ident}")
-def event(ident: int, db: Session = Depends(get_db)):
+def event(
+    ident: int, projection: runtime.Projection = "full", db: Session = Depends(get_db)
+):
     try:
-        return reports.event_detail(db, ident)
+        reports.read_snapshot(db)
+        return runtime.project_event(reports.event_detail(db, ident), projection)
     except svc.Problem as exc:
         raise error(exc) from exc
 
@@ -312,6 +373,7 @@ LISTS = {
     "schedules": m.Schedule,
     "ownership": m.Ownership,
     "reconciliations": m.Reconciliation,
+    "reconciliation_revisions": m.ReconciliationRevision,
     "report_runs": m.ReportRun,
     "reporting_groups": m.ReportingGroup,
     "group_members": m.GroupMember,
@@ -511,31 +573,118 @@ def statement_pdf(
 
 @router.get("/observations/{ident}/state")
 def observation_state(
-    ident: int, as_of: date | None = None, db: Session = Depends(get_db)
+    ident: int,
+    as_of: date | None = None,
+    projection: runtime.Projection = "full",
+    db: Session = Depends(get_db),
 ):
     from app.portfolio.observation_state import observation_state as read_state
 
     try:
-        return read_state(db, ident, as_of)
+        return runtime.project_state(read_state(db, ident, as_of), projection)
     except svc.Problem as exc:
         raise error(exc) from exc
 
 
-@router.get("/requests/{key}")
-def request_result(key: str, db: Session = Depends(get_db)):
+@router.get("/observation-states")
+def observation_states(
+    ids: list[int] = Query(min_length=1, max_length=200),
+    as_of: date | None = None,
+    projection: runtime.Projection = "full",
+    db: Session = Depends(get_db),
+):
+    from app.portfolio.observation_state import observation_state as read_state
+
+    if any(ident <= 0 for ident in ids) or len(set(ids)) != len(ids):
+        raise HTTPException(
+            422, detail="Supply 1 to 200 unique positive observation IDs"
+        )
+    try:
+        reports.read_snapshot(db)
+        states = [read_state(db, ident, as_of) for ident in ids]
+        return {
+            "states": [runtime.project_state(state, projection) for state in states],
+            "count": len(states),
+            "projection": projection,
+            "truncated": False,
+            "snapshot_digest": svc.digest(
+                [
+                    {
+                        "observation_id": state["observation"]["id"],
+                        "state_digest": state["state_digest"],
+                    }
+                    for state in states
+                ]
+            ),
+            "snapshot_scope": "One SQLite read snapshot for this response; other database engines follow their configured isolation. Digest is not a cross-request snapshot cursor.",
+        }
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/requests")
+@router.get("/requests/{key:path}")
+def request_result(
+    key: str, projection: runtime.Projection = "full", db: Session = Depends(get_db)
+):
     record = db.get(m.RequestRecord, key)
     if record is None:
-        return {"key": key, "committed": False, "status": "not_found"}
-    return {"key": key, "status": "committed", "result": record.result}
+        return {
+            "key": key,
+            "committed": False,
+            "status": "not_found",
+            "execution_state": "unknown",
+            "recovery": "No committed result is visible. The request may still be running; retrieve again or retry the identical key and body. Never use a new key to recover an unknown outcome.",
+        }
+    return {
+        "key": key,
+        "committed": True,
+        "status": "committed",
+        "execution_state": "committed",
+        "result": runtime.operation_result(record.result, projection=projection),
+    }
 
 
 @router.get("/reviews/{ident}/shortage-assessment")
 def shortage_assessment(
-    ident: int, as_of: date | None = None, db: Session = Depends(get_db)
+    ident: int,
+    as_of: date | None = None,
+    corrective_event_ids: list[int] | None = Query(
+        default=None, min_length=1, max_length=100
+    ),
+    db: Session = Depends(get_db),
 ):
     from app.portfolio.assessments import shortage_assessment as assess
 
     try:
+        if corrective_event_ids is not None:
+            if any(i <= 0 for i in corrective_event_ids) or len(
+                set(corrective_event_ids)
+            ) != len(corrective_event_ids):
+                raise HTTPException(
+                    422, detail="Supply unique positive corrective event IDs"
+                )
+            return assess(db, ident, as_of, corrective_event_ids)
         return assess(db, ident, as_of)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/reconciliations/{ident}/revision-state")
+def reconciliation_revision_state(ident: int, db: Session = Depends(get_db)):
+    from app.portfolio.reconciliation_evidence import reconciliation_state
+
+    try:
+        return reconciliation_state(db, ident)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/outgoing-funding-assessment")
+def outgoing_funding_assessment(observation_id: int, db: Session = Depends(get_db)):
+    from app.portfolio.outgoing_funding import outgoing_funding_assessment as assess
+
+    try:
+        return assess(db, observation_id)
     except svc.Problem as exc:
         raise error(exc) from exc
