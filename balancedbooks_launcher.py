@@ -58,7 +58,7 @@ def prepare(data_dir, filename=None):
         FORCE_HTTPS="false",
         APP_HOST="127.0.0.1",
         SLOWBOOKS_DESKTOP="1",
-        APP_VERSION="0.3.0",
+        APP_VERSION="0.4.0",
     )
     from dotenv import load_dotenv
 
@@ -71,8 +71,34 @@ def prepare(data_dir, filename=None):
     cfg.set_main_option("script_location", str(root / "migrations"))
     cfg.attributes["database_url"] = os.environ["DATABASE_URL"]
     command.upgrade(cfg, "head")
+    ensure_company_identity()
     ensure_local_token(token_path)
     return root
+
+
+def ensure_company_identity():
+    """Initialize the existing session identity before either native entry point.
+
+    Token-only companies may never have opened a browser session. Serialize
+    first creation so two local launchers cannot assign competing identities.
+    Existing companies retain their exact identity and all other settings.
+    """
+    from sqlalchemy import text
+    from app.database import SessionLocal
+    from app.models.settings import Settings
+    from app.services.auth import COMPANY_SESSION_SETTING
+
+    with SessionLocal() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        row = db.query(Settings).filter_by(key=COMPANY_SESSION_SETTING).first()
+        if row is None:
+            row = Settings(key=COMPANY_SESSION_SETTING, value=secrets.token_hex(16))
+            db.add(row)
+        elif not row.value:
+            row.value = secrets.token_hex(16)
+        identity = row.value
+        db.commit()
+        return identity
 
 
 def ensure_local_token(path):
