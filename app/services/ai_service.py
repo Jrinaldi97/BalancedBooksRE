@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 # Cloudflare account IDs are exactly 32 lowercase hex chars.
 # Validate before interpolating into URLs to prevent SSRF.
-CLOUDFLARE_ACCOUNT_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+CLOUDFLARE_ACCOUNT_ID_RE = re.compile(r"[a-f0-9]{32}")
 
 # Hosts that must never be accepted as a user-supplied Worker URL.
 _BLOCKED_WORKER_HOSTS = {
@@ -149,7 +149,7 @@ def validate_worker_url(url: str) -> str:
             )
     else:
         # DNS hostname — basic character sanity check.
-        if not re.match(r"^[a-z0-9._-]+$", host):
+        if not re.fullmatch(r"[a-z0-9._-]+", host):
             raise ValueError(f"worker_url host '{host}' contains invalid characters")
         if ".." in host or host.startswith(".") or host.endswith("."):
             raise ValueError(f"worker_url host '{host}' is malformed")
@@ -679,7 +679,7 @@ def build_request(
     if provider_key == "cloudflare":
         if not account_id:
             raise ValueError("Cloudflare Workers AI requires an account_id")
-        if not CLOUDFLARE_ACCOUNT_ID_RE.match(account_id):
+        if not CLOUDFLARE_ACCOUNT_ID_RE.fullmatch(account_id):
             raise ValueError(
                 "cloudflare_account_id must be exactly 32 lowercase hex characters"
             )
@@ -1016,7 +1016,7 @@ def build_models_request(
             "headers": {"x-goog-api-key": api_key},
         }
     if provider_key == "cloudflare":
-        if not account_id or not CLOUDFLARE_ACCOUNT_ID_RE.match(account_id):
+        if not account_id or not CLOUDFLARE_ACCOUNT_ID_RE.fullmatch(account_id):
             raise ValueError("cloudflare: a valid account id is required")
         return {
             "method": "GET",

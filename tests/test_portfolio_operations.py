@@ -709,3 +709,21 @@ def test_compact_counts_windows_and_latest_attestations_share_one_snapshot(
             row["id"] for row in current["verification"]["latest_attestations"]
         ] == [latest_id, inserted[0]]
         assert current["verification"]["latest_attestations"][-1]["status"] == "failed"
+
+
+def test_run_manifest_follows_durable_admission_and_cancellation(company):
+    from app.portfolio.agent_exports import run_manifest
+
+    payload, _, _ = admit(company)
+    with company[1]() as db:
+        before = run_manifest(db, [payload.key])["operations"][0]
+        assert before["state"] == "accepted" and before["body_digest"]
+        ops.cancel_operation(db, payload.key)
+        db.commit()
+    with company[1]() as db:
+        assert run_manifest(db, [payload.key])["operations"][0]["state"] == "cancelled"
+    other, _, _ = admit(company, key="another", data={"code": "TWO", "name": "Two"})
+    ops.run_operation(company[0], other.key)
+    with company[1]() as db:
+        result = run_manifest(db, [other.key])["operations"][0]
+        assert result["state"] == "committed" and result["attestations"] == []

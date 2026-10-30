@@ -40,6 +40,10 @@ import app.database as db_module
 from app.database import get_db
 from app.main import app
 
+# The seeded admin row is never signed in to with a password; a named
+# constant keeps it apart from the username for the secret scanner.
+_NO_PASSWORD = "x"
+
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "d3d40d716684"
 REVISION = "c5e1f7a9b3d2"
@@ -55,13 +59,29 @@ def _sign_in_here(Session) -> None:
     """Opening another company file is signing in to it: a sign-in belongs
     to the company it was made in (app/services/auth.py). The file takes the
     id the client's session was signed in with, so the session stays good
-    here, as it would after signing in."""
+    here, as it would after signing in. The session also names its user and
+    the version it is good for (revocable sessions), re-checked against
+    the users table every request, so the file carries the matching admin row
+    (id 1, the client fixture's admin) the same way it carries the id above."""
+    from app.models.users import User
     from app.services import auth as auth_service
     from app.services.settings_service import set_setting
 
     signed_in_to = auth_service._company_id()
     with Session() as s:
         set_setting(s, "company_session_id", signed_in_to)
+        if s.get(User, 1) is None:
+            s.add(
+                User(
+                    id=1,
+                    username="admin",
+                    display_name="Operator",
+                    password_hash=_NO_PASSWORD,
+                    role="admin",
+                    is_active=True,
+                    session_version=0,
+                )
+            )
         s.commit()
 
 

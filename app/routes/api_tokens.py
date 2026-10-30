@@ -89,6 +89,11 @@ def update_token(
     row = db.query(ApiToken).filter(ApiToken.id == token_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail="Token not found")
+    if payload.is_active is True and not row.is_active:
+        raise HTTPException(
+            status_code=409,
+            detail="A revoked token cannot be reactivated; create a new token",
+        )
     if payload.label is not None:
         label = payload.label.strip()
         clash = (

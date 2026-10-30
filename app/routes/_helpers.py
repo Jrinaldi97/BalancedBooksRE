@@ -19,3 +19,33 @@ def get_or_404(db: Session, model: Type[T], obj_id: int, name: str = None) -> T:
         label = name or model.__name__
         raise HTTPException(status_code=404, detail=f"{label} not found")
     return obj
+
+
+def reject_null_updates(model: Type[T], update_data: dict) -> dict:
+    """Refuse a PUT that explicitly sets a NOT NULL column to null (422).
+
+    The Update schemas are all-optional and the routes dump them with
+    exclude_unset=True, so a field the client sent as ``null`` (but a field
+    they omitted does not) survives into ``update_data`` as None. Assigning
+    that to a NOT NULL column raised an opaque IntegrityError at commit — an
+    HTTP 500 (``PUT /api/customers/{id}`` or ``/vendors/{id}`` with
+    ``{"name": null}``). This names the field and answers 422 instead. An
+    omitted field never reaches ``update_data``, so an empty ``{}`` PUT is
+    still a no-op 200. Generic on the model's columns rather than per-schema,
+    so it covers every Update schema the same way. Returns ``update_data`` so
+    callers can inline it.
+    """
+    offenders = sorted(
+        c.name
+        for c in model.__table__.columns
+        if not c.nullable
+        and not c.primary_key
+        and c.name in update_data
+        and update_data[c.name] is None
+    )
+    if offenders:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{', '.join(offenders)} may not be set to null.",
+        )
+    return update_data

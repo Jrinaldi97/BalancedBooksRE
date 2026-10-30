@@ -3,7 +3,15 @@
 from datetime import date
 from typing import Literal
 from pydantic import Field, model_validator
-from app.portfolio.schemas import Input, Id, Cents, SignedCents, BankRow, CONTRACTS
+from app.portfolio.schemas import (
+    Input,
+    Id,
+    Cents,
+    SignedCents,
+    BankRow,
+    CONTRACTS,
+    BeneficiaryEvidence,
+)
 
 
 class CardIdentityInput(Input):
@@ -20,6 +28,16 @@ class CardAliasInput(Input):
     start: date
     end: date | None = None
     evidence: str = Field(min_length=1)
+    replaces_alias_id: Id | None = None
+    replacement_evidence: BeneficiaryEvidence | None = None
+
+    @model_validator(mode="after")
+    def replacement_identity(self):
+        if bool(self.replaces_alias_id) != bool(self.replacement_evidence):
+            raise ValueError(
+                "Alias replacement requires its predecessor and registered issuer evidence together"
+            )
+        return self
 
 
 class IssuerRow(BankRow):
@@ -40,6 +58,34 @@ class CardObservation(Input):
     expected_state_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class CardInvoice(Input):
+    code: str = Field(min_length=1, max_length=64)
+    supplier_id: Id
+    invoice_date: date
+    service_start: date | None = None
+    service_end: date | None = None
+    gross_cents: Cents = Field(gt=0)
+    earned_discount_cents: Cents = 0
+    forfeited_discount_cents: Cents = 0
+    source: BeneficiaryEvidence
+    expected_invoice_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def completed_invoice(self):
+        if self.earned_discount_cents >= self.gross_cents:
+            raise ValueError("Earned discount must leave a positive invoice balance")
+        if bool(self.service_start) != bool(self.service_end):
+            raise ValueError("Supply both service dates or neither")
+        if (
+            self.service_end
+            and not self.service_start <= self.service_end <= self.invoice_date
+        ):
+            raise ValueError(
+                "Invoice-date recognition requires a completed service period"
+            )
+        return self
+
+
 class CardCostComponent(Input):
     key: str = Field(min_length=1, max_length=24, pattern=r"^[A-Za-z0-9_-]+$")
     amount_cents: Cents = Field(gt=0)
@@ -50,9 +96,22 @@ class CardCostComponent(Input):
     property_id: Id | None = None
     unit_id: Id | None = None
     evidence: str = Field(min_length=1)
+    recognition_policy: Literal["issuer_date", "invoice_date", "funded_deposit"] = (
+        "issuer_date"
+    )
+    invoice: CardInvoice | None = None
 
     @model_validator(mode="after")
     def target(self):
+        if (self.recognition_policy == "invoice_date") != (self.invoice is not None):
+            raise ValueError(
+                "Invoice-date recognition requires invoice evidence; other policies cannot carry an invoice"
+            )
+        if (
+            self.beneficiary_kind == "external_party"
+            and self.recognition_policy != "issuer_date"
+        ):
+            raise ValueError("Invoice timing requires maintained beneficiary books")
         if self.beneficiary_kind == "external_party":
             if not self.party_id or self.entity_id or self.account_id:
                 raise ValueError(

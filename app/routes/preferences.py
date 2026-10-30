@@ -18,7 +18,7 @@ from app.models.preferences import UserPreference
 
 router = APIRouter(prefix="/api/preferences", tags=["preferences"])
 
-_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,49}$")
+_KEY_RE = re.compile(r"[a-z][a-z0-9_]{0,49}")
 _MAX_BYTES = 16_000
 
 
@@ -30,7 +30,7 @@ def _user_id(request: Request):
 
 
 def _check_key(key: str):
-    if not _KEY_RE.match(key):
+    if not _KEY_RE.fullmatch(key):
         raise HTTPException(
             status_code=422, detail="Preference key must be a short snake_case name"
         )

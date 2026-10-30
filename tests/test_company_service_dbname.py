@@ -22,12 +22,12 @@ HOSTILE_NAMES = [
 
 def test_valid_db_name_rejects_hostile_input():
     for name in HOSTILE_NAMES:
-        assert not _VALID_DB_NAME.match(name), name
+        assert not _VALID_DB_NAME.fullmatch(name), name
 
 
 def test_valid_db_name_accepts_normal_names():
     for name in ["acme", "acme_books", "Acme-2026", "a"]:
-        assert _VALID_DB_NAME.match(name), name
+        assert _VALID_DB_NAME.fullmatch(name), name
 
 
 def test_create_company_rejects_invalid_name_before_any_sql():

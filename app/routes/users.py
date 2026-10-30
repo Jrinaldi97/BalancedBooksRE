@@ -21,7 +21,7 @@ from app.services.auth import MIN_PASSWORD_LEN, hash_password
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
-_USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,49}$")
+_USERNAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{2,49}")
 
 
 def _require_admin(request: Request) -> None:
@@ -74,7 +74,7 @@ def list_users(request: Request, db: Session = Depends(get_db)):
 def create_user(payload: UserCreate, request: Request, db: Session = Depends(get_db)):
     _require_admin(request)
     username = payload.username.strip().lower()
-    if not _USERNAME_RE.match(username):
+    if not _USERNAME_RE.fullmatch(username):
         raise HTTPException(
             status_code=400,
             detail="Username must be 3-50 characters: letters, digits, . _ -",
@@ -111,6 +111,7 @@ def update_user(
 
     demoting = payload.role is not None and payload.role != ROLE_ADMIN
     deactivating = payload.is_active is False
+    role_changed = payload.role is not None and payload.role != user.role
     if (
         user.role == ROLE_ADMIN
         and user.is_active
@@ -137,5 +138,9 @@ def update_user(
                 detail=f"Password must be at least {MIN_PASSWORD_LEN} characters",
             )
         user.password_hash = hash_password(payload.password)
+    if deactivating or role_changed or payload.password:
+        from app.services.auth import bump_session_version
+
+        bump_session_version(user)
     db.commit()
     return _user_out(user)

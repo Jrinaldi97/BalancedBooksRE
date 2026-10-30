@@ -36,3 +36,6 @@ class User(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     last_login_at = Column(DateTime, nullable=True)
+
+    # A password, role or active-state change ends previously issued sessions.
+    session_version = Column(Integer, nullable=False, default=0, server_default="0")

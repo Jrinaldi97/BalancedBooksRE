@@ -35,7 +35,13 @@ BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 # class with a known backup extension. NO path separators, NO ".."
 # components -- this is the trust boundary that CodeQL needs to see at the
 # start of restore_backup() before BACKUP_DIR / filename is constructed.
-_BACKUP_FILENAME_RE = re.compile(r"^[A-Za-z0-9_.-]+\.(sql|dump|backup|db)$")
+# Matched with re.fullmatch (not .match + ^...$): in Python `$` also matches
+# just before a trailing "\n", so "evil.db\n" would slip through .match.
+# The extension is split off first and the stem matched on its own: one
+# pattern holding both a "." in the class and a literal "\." before the
+# extension backtracks polynomially on a long run of those characters.
+_BACKUP_STEM_RE = re.compile(r"[A-Za-z0-9_.-]+")
+_BACKUP_EXTENSIONS = frozenset({"sql", "dump", "backup", "db"})
 
 # Every company's backups share one folder, and the old names said nothing
 # about whose they were (explore 2.17.3, macbase1 F25: Riverbend x3,
@@ -103,7 +109,10 @@ def _safe_backup_filename(filename: str) -> str | None:
         return None
     if base.startswith(".") or ".." in base:
         return None
-    if not _BACKUP_FILENAME_RE.match(base):
+    stem, dot, extension = base.rpartition(".")
+    if not dot or extension not in _BACKUP_EXTENSIONS:
+        return None
+    if not _BACKUP_STEM_RE.fullmatch(stem):
         return None
     return base
 

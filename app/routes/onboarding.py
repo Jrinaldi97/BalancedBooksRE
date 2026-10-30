@@ -10,6 +10,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.routes._helpers import reject_null_updates
 from app.models.payroll import Employee
 from app.models.hr import OnboardingTask, OnboardingTaskType, OnboardingTaskStatus
 from app.schemas.hr import (
@@ -105,7 +106,7 @@ def update_task(
     task = db.query(OnboardingTask).filter(OnboardingTask.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Onboarding task not found")
-    fields = data.model_dump(exclude_unset=True)
+    fields = reject_null_updates(OnboardingTask, data.model_dump(exclude_unset=True))
     now = datetime.now(timezone.utc)
 
     if "status" in fields:

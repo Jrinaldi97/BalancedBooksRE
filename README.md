@@ -1,6 +1,6 @@
 # BalancedBooksRE
 
-A customized Mac real-estate accounting fork. See [BalancedBooksRE usage and accounting controls](BALANCEDBOOKSRE.md). Original upstream documentation follows.
+A customized Mac real-estate accounting fork. See [BalancedBooksRE usage and accounting controls](BALANCEDBOOKSRE.md). Current fork release: **0.6.0**. See [workflow changes and upstream comparison](docs/bbre-0.6.0-engineering.md). Original upstream documentation follows.
 
 # Slowbooks Pro 2026
 

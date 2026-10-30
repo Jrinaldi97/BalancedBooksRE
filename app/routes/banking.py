@@ -1,3 +1,5 @@
+from app.routes._helpers import reject_null_updates
+
 # ============================================================================
 # Bank accounts + reconciliation — toggle cleared items, then validate
 # their sum matches the statement balance.
@@ -232,7 +234,7 @@ def update_bank_account(
     ba = db.query(BankAccount).filter(BankAccount.id == account_id).first()
     if not ba:
         raise HTTPException(status_code=404, detail="Bank account not found")
-    fields = data.model_dump(exclude_unset=True)
+    fields = reject_null_updates(BankAccount, data.model_dump(exclude_unset=True))
     if "account_id" in fields and fields["account_id"] != ba.account_id:
         linked = (
             db.query(BankTransaction.id)

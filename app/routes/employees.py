@@ -21,6 +21,7 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.routes._helpers import reject_null_updates
 from app.models.attachments import Attachment
 from app.models.bank_accounts import (
     EmployeeBankAccount,
@@ -208,7 +209,8 @@ def update_employee(emp_id: int, data: EmployeeUpdate, db: Session = Depends(get
     emp = db.query(Employee).filter(Employee.id == emp_id).first()
     if not emp:
         raise HTTPException(status_code=404, detail="Employee not found")
-    for key, val in _clean_employee_fields(data.model_dump(exclude_unset=True)).items():
+    update_data = reject_null_updates(Employee, data.model_dump(exclude_unset=True))
+    for key, val in _clean_employee_fields(update_data).items():
         setattr(emp, key, val)
     db.commit()
     db.refresh(emp)

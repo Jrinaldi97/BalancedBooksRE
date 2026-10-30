@@ -113,6 +113,9 @@ class Books:
             ],
         }
         self.deposited = False
+        monkeypatch.setattr(
+            qbo_import, "_all_inactive_qbo_accounts", lambda cls, client: []
+        )
         monkeypatch.setattr(qbo_import, "get_qbo_client", lambda db: object())
         monkeypatch.setattr(
             qbo_import,

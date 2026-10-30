@@ -120,3 +120,20 @@ this does not resolve shortage reviews or infer funding.
 Shortage assessments expose their resolution_contract and the input schema
 explains single-event versus candidate-set digest requirements. Native MCP
 rejections preserve isError and expose structuredContent plus plain JSON text.
+
+## Evidence and agent workflows (0.6.0)
+
+The native contract now supports correction families, transfer components, posted
+mortgage corrections and atomic supplier-invoice/card timing. Use `mortgage_state`
+or `invoice_state` to obtain current guards before preparing those changes.
+`evidence_plan`, `coverage_plan` and `document_state` identify what evidence remains
+missing without treating a software review status as independent source proof.
+
+For large runs, use compact responses, `review_register`, digest-bound `proof_page`
+and `run_manifest`. Keep the exact request key through timeout recovery. Full
+proofs remain recoverable; accepted, prepared, committed and reviewer-attested
+work have distinct meanings. The new release preserves coarse preview revision
+checks while avoiding redundant revision-counter audit rows.
+
+See [0.6.0 engineering notes](docs/bbre-0.6.0-engineering.md) for exact operation
+boundaries, the selective SlowBooks Pro 2.31.1 comparison, migration and validation.

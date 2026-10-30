@@ -668,7 +668,7 @@ def put_ai_config(
     endpoint_url_raw = (payload.endpoint_url or "").strip()
 
     # SSRF guard #1: CF account_id must be exactly 32 hex chars.
-    if account_id and not CLOUDFLARE_ACCOUNT_ID_RE.match(account_id):
+    if account_id and not CLOUDFLARE_ACCOUNT_ID_RE.fullmatch(account_id):
         raise HTTPException(
             status_code=400,
             detail="cloudflare_account_id must be exactly 32 lowercase hex characters",

@@ -1,6 +1,8 @@
 """Authenticated portfolio API. Mounted under the existing session/token gate."""
 
 import json
+from typing import Literal
+from functools import lru_cache
 from datetime import date
 from fastapi import (
     APIRouter,
@@ -101,7 +103,7 @@ def context(db: Session = Depends(get_db)):
             "company_file": Path(database).name if database else None,
             "database_engine": db.get_bind().dialect.name,
             "upstream_base_version": __version__,
-            "portfolio_release": "2026.10-evidence-workflows.5",
+            "portfolio_release": "2026.10-evidence-workflows.6",
             "schema_revisions": versions,
             "command_schema_digest": svc.digest(commands()),
             "company_session_id": runtime.company_session_id(db),
@@ -152,11 +154,26 @@ def context(db: Session = Depends(get_db)):
     }
 
 
+@lru_cache(maxsize=8)
+def _schema_catalog(contracts):
+    return {name: contract.model_json_schema() for name, contract in contracts}
+
+
 @router.get("/commands")
-def commands():
-    return {
-        name: contract.model_json_schema() for name, contract in s.CONTRACTS.items()
-    }
+def commands(operations: str | None = None):
+    catalog = _schema_catalog(tuple(s.CONTRACTS.items()))
+    if operations is None:
+        return catalog
+    names = operations.split(",")
+    if (
+        not 1 <= len(names) <= 20
+        or len(set(names)) != len(names)
+        or any(name not in catalog for name in names)
+    ):
+        raise HTTPException(
+            422, detail="Choose 1 to 20 unique supported operation names"
+        )
+    return {name: catalog[name] for name in names}
 
 
 @router.post("/commands")
@@ -855,11 +872,13 @@ def owner_custody_state(item_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/storage-diagnostics")
-def storage_diagnostics(db: Session = Depends(get_db)):
+def storage_diagnostics(
+    projection: Literal["full", "compact"] = "full", db: Session = Depends(get_db)
+):
     from app.portfolio.storage_diagnostics import storage_diagnostics as read_storage
 
     try:
-        return read_storage(db)
+        return read_storage(db, projection)
     except svc.Problem as exc:
         raise error(exc) from exc
 
@@ -870,6 +889,32 @@ def card_state(card_id: int, as_of: date | None = None, db: Session = Depends(ge
 
     try:
         return read_state(db, card_id, as_of)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/mortgage-state")
+def mortgage_state(
+    observation_id: int,
+    debt_account_id: int,
+    instrument: str,
+    property_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    from app.portfolio.mortgages import mortgage_state as read_state
+
+    try:
+        return read_state(db, observation_id, debt_account_id, instrument, property_id)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/invoice-state")
+def invoice_state(code: str, db: Session = Depends(get_db)):
+    from app.portfolio.card_invoices import invoice_state as read_state
+
+    try:
+        return read_state(db, code)
     except svc.Problem as exc:
         raise error(exc) from exc
 
@@ -885,5 +930,87 @@ def verification_export(
 
     try:
         return export(db, after_id, limit, expected_book_digest)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/review-register")
+def review_register(
+    after_id: int = 0,
+    limit: int = 100,
+    expected_book_digest: str | None = None,
+    status: str | None = None,
+    code: str | None = None,
+    db: Session = Depends(get_db),
+):
+    from app.portfolio.agent_exports import review_register as read
+
+    try:
+        return read(db, after_id, limit, expected_book_digest, status, code)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/proof")
+def proof(
+    kind: str,
+    identity: str,
+    offset: int = 0,
+    limit: int = 8192,
+    expected_digest: str | None = None,
+    db: Session = Depends(get_db),
+):
+    from app.portfolio.agent_exports import proof_page
+
+    try:
+        return proof_page(db, kind, identity, offset, limit, expected_digest)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/run-manifest")
+def run_manifest(keys: str = Query(max_length=25000), db: Session = Depends(get_db)):
+    from app.portfolio.agent_exports import run_manifest as read
+
+    try:
+        return read(db, json.loads(keys))
+    except ValueError as exc:
+        if isinstance(exc, svc.Problem):
+            raise error(exc) from exc
+        raise HTTPException(
+            422, detail="keys must be a JSON array of exact request keys"
+        ) from exc
+
+
+@router.get("/evidence-plan")
+def evidence_plan(observation_id: int, db: Session = Depends(get_db)):
+    from app.portfolio.evidence_plans import evidence_plan as read
+
+    try:
+        return read(db, observation_id)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/coverage-plan")
+def coverage_plan(
+    account_id: int, start: date, end: date, db: Session = Depends(get_db)
+):
+    from app.portfolio.evidence_plans import coverage_plan as read
+
+    try:
+        return read(db, account_id, start, end)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/document-state")
+def document_state(
+    document_id: int, verify_local: bool = False, db: Session = Depends(get_db)
+):
+    from app.portfolio.evidence_plans import document_state as read
+
+    try:
+        return read(db, document_id, verify_local)
     except svc.Problem as exc:
         raise error(exc) from exc

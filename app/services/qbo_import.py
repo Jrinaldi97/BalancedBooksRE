@@ -16,6 +16,7 @@ from decimal import Decimal, InvalidOperation
 
 from fastapi import HTTPException
 
+from app.services.audit import audited_bulk_delete
 from sqlalchemy.orm import Session
 
 from app.models.accounts import Account, AccountType
@@ -694,7 +695,9 @@ def _bring_lines_across(db, mapping, invoice, source, kind) -> bool:
         return False
     old_lines = snapshot_invoice_lines(invoice)
     invoice.tax_rate = values["tax_rate"]
-    db.query(InvoiceLine).filter(InvoiceLine.invoice_id == invoice.id).delete()
+    audited_bulk_delete(
+        db, db.query(InvoiceLine).filter(InvoiceLine.invoice_id == invoice.id)
+    )
     db.flush()
     for order, line in enumerate(values["lines"]):
         db.add(InvoiceLine(invoice_id=invoice.id, line_order=order, **line))
@@ -729,13 +732,14 @@ def _refresh_invoice(db, mapping, source, kind, errors) -> None:
     )
     from app.services.qbo_documents import (
         closed_on,
+        current_invoice_for_import,
         import_posting,
         local_cost_live,
         paid_past_new_total,
         why_not_changed,
     )
 
-    invoice = db.get(Invoice, mapping.slowbooks_id)
+    invoice = current_invoice_for_import(db, mapping.slowbooks_id)
     token = _changed_in_qbo(mapping, source)
     if token is None and _bring_lines_across(db, mapping, invoice, source, kind):
         return
@@ -780,7 +784,9 @@ def _refresh_invoice(db, mapping, source, kind, errors) -> None:
         setattr(invoice, key, values[key])
     invoice.tax_amount, invoice.total = values["tax_amount"], values["total"]
     invoice.tax_rate = values["tax_rate"]
-    db.query(InvoiceLine).filter(InvoiceLine.invoice_id == invoice.id).delete()
+    audited_bulk_delete(
+        db, db.query(InvoiceLine).filter(InvoiceLine.invoice_id == invoice.id)
+    )
     db.flush()
     for order, line in enumerate(values["lines"]):
         db.add(InvoiceLine(invoice_id=invoice.id, line_order=order, **line))

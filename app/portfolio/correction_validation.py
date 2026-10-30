@@ -159,8 +159,73 @@ def _movements(db, obs, state, manifest, rows_by_basis):
     return {"kind": kind, "observations": declared}, original_events
 
 
+def _check_obligation(db, expected, account, correction, obs):
+    from app.portfolio.service import fail, get
+
+    beneficiary, decoder = _beneficiary(correction, obs)
+    if not expected.party_id:
+        fail(
+            "missing_beneficiary",
+            "Identify the supported obligation beneficiary",
+        )
+    get(db, m.Party, expected.party_id)
+    if expected.fund_id:
+        if get(db, m.Fund, expected.fund_id).beneficiary_id != expected.party_id:
+            fail("wrong_beneficiary", "Fund and specified beneficiary disagree")
+    elif beneficiary != expected.party_id:
+        if beneficiary is not None:
+            fail(
+                "wrong_beneficiary",
+                "Recorded and supplied beneficiaries conflict",
+            )
+        proof = expected.beneficiary_evidence
+        if proof is None:
+            fail(
+                "missing_beneficiary",
+                "Provide a registered source version for this exact obligation scope",
+            )
+        get(db, m.Document, proof.document_id)
+        if (
+            not db.query(m.DocumentLocation)
+            .filter_by(document_id=proof.document_id, sha256=proof.sha256)
+            .first()
+        ):
+            fail(
+                "beneficiary_evidence",
+                "Register the exact supporting document hash first",
+            )
+        if (
+            not db.query(m.DocumentLink)
+            .filter_by(document_id=proof.document_id, event_id=correction.id)
+            .first()
+        ):
+            fail(
+                "beneficiary_evidence",
+                "Link the supporting document to this correction first",
+            )
+        # This explicit reviewer association is retained in the resolution
+        # and immutable receipt; historical source JSON is never rewritten.
+        # It cannot override a typed party or a fund beneficiary.
+
+    if decoder and (
+        expected.party_id != beneficiary or expected.item != correction.source["item"]
+    ):
+        fail(
+            "wrong_beneficiary",
+            "Historical beneficiary and individual obligation item must agree",
+        )
+
+
 def validate_existing(db, data, actor):
-    from app.portfolio.service import fail, get, line, scope, validate_lines
+    from app.portfolio.service import (
+        Problem,
+        digest,
+        fail,
+        get,
+        line,
+        scope,
+        validate_lines,
+    )
     from app.portfolio.observation_state import observation_state
     from app.portfolio.reports import ledger
 
@@ -175,9 +240,18 @@ def validate_existing(db, data, actor):
     state = observation_state(db, obs.id)
     if state["state_digest"] != data.observation.expected_state_digest:
         fail("stale_state", "Observation changed; inspect it again")
+    support_ids = data.supporting_corrective_event_ids or [data.corrective_event_id]
     if (
-        data.corrective_event_id == obs.event_id
-        or data.corrective_event_id not in state["event_ids"]
+        len(set(support_ids)) != len(support_ids)
+        or data.corrective_event_id not in support_ids
+    ):
+        fail(
+            "correction_lineage",
+            "Support IDs must be unique and include the resolution anchor",
+        )
+    if any(
+        ident == obs.event_id or ident not in state["event_ids"]
+        for ident in support_ids
     ):
         fail(
             "correction_lineage",
@@ -206,7 +280,7 @@ def validate_existing(db, data, actor):
     manifest, original_events = _movements(
         db, obs, state, data.movement_manifest, rows_by_basis
     )
-    if correction.id in original_events:
+    if set(support_ids) & original_events:
         fail(
             "correction_lineage",
             "An original movement cannot be its family's corrective event",
@@ -235,10 +309,14 @@ def validate_existing(db, data, actor):
         get(db, m.Party, beneficiary)
     # Existing one-bank callers never declared cash_flow. Preserve that
     # original matching contract unless the caller opts into an expanded scope.
-    complete_scope = data.movement_manifest is not None or any(
-        row.model_fields_set & {"entity_id", "cash_flow"}
-        or scope(db, row.account_id).entity_id != account.entity_id
-        for row in data.balances
+    complete_scope = (
+        data.supporting_corrective_event_ids is not None
+        or data.movement_manifest is not None
+        or any(
+            row.model_fields_set & {"entity_id", "cash_flow"}
+            or scope(db, row.account_id).entity_id != account.entity_id
+            for row in data.balances
+        )
     )
     dimensions = (
         DIMENSIONS
@@ -246,6 +324,8 @@ def validate_existing(db, data, actor):
         else tuple(key for key in DIMENSIONS if key != "cash_flow")
     )
     expected_totals = {}
+    support_mapping = []
+    used_support_ids = set()
     reciprocal = defaultdict(int)
     reciprocal_roles = defaultdict(set)
     for expected in data.balances:
@@ -285,62 +365,6 @@ def validate_existing(db, data, actor):
             "custody_asset",
             "custody_liability",
         }
-        if obligation:
-            if not expected.party_id:
-                fail(
-                    "missing_beneficiary",
-                    "Identify the supported obligation beneficiary",
-                )
-            get(db, m.Party, expected.party_id)
-            if expected.fund_id:
-                if (
-                    get(db, m.Fund, expected.fund_id).beneficiary_id
-                    != expected.party_id
-                ):
-                    fail("wrong_beneficiary", "Fund and specified beneficiary disagree")
-            elif beneficiary != expected.party_id:
-                if beneficiary is not None:
-                    fail(
-                        "wrong_beneficiary",
-                        "Recorded and supplied beneficiaries conflict",
-                    )
-                proof = expected.beneficiary_evidence
-                if proof is None:
-                    fail(
-                        "missing_beneficiary",
-                        "Provide a registered source version for this exact obligation scope",
-                    )
-                get(db, m.Document, proof.document_id)
-                if (
-                    not db.query(m.DocumentLocation)
-                    .filter_by(document_id=proof.document_id, sha256=proof.sha256)
-                    .first()
-                ):
-                    fail(
-                        "beneficiary_evidence",
-                        "Register the exact supporting document hash first",
-                    )
-                if (
-                    not db.query(m.DocumentLink)
-                    .filter_by(document_id=proof.document_id, event_id=correction.id)
-                    .first()
-                ):
-                    fail(
-                        "beneficiary_evidence",
-                        "Link the supporting document to this correction first",
-                    )
-                # This explicit reviewer association is retained in the resolution
-                # and immutable receipt; historical source JSON is never rewritten.
-                # It cannot override a typed party or a fund beneficiary.
-
-            if decoder and (
-                expected.party_id != beneficiary
-                or expected.item != correction.source["item"]
-            ):
-                fail(
-                    "wrong_beneficiary",
-                    "Historical beneficiary and individual obligation item must agree",
-                )
         if account.role in {"due_from", "due_to"}:
             if (
                 not expected.counterparty_id
@@ -360,27 +384,98 @@ def validate_existing(db, data, actor):
             key = (*pair, expected.item)
             reciprocal[key] += expected.amount_cents
             reciprocal_roles[key].add(account.role)
-        for rows in rows_by_basis.values():
+        contributions = {}
+        for basis, rows in rows_by_basis.items():
             matching = [
                 row
                 for row in rows
                 if row["account_id"] == expected.account_id
                 and all(row.get(key) == getattr(expected, key) for key in dimensions)
             ]
-            if sum(
+            actual_amount = sum(
                 row["debit_cents"] - row["credit_cents"] for row in matching
-            ) != expected.amount_cents or not any(
-                (
-                    row["event_id"] == correction.id
-                    if obligation
-                    else row["event_id"] not in original_events
-                )
-                for row in matching
-            ):
-                fail(
+            )
+            if actual_amount != expected.amount_cents:
+                raise Problem(
                     "expected_balance",
-                    "Linked correction does not establish the stated scope and amount on both bases",
+                    "Effective family differs from the stated scope and expected balance",
+                    {
+                        "basis": basis,
+                        "expected": expected.model_dump(),
+                        "actual_cents": actual_amount,
+                    },
                 )
+            event_totals = defaultdict(int)
+            for row in matching:
+                event_totals[row["event_id"]] += (
+                    row["debit_cents"] - row["credit_cents"]
+                )
+            contributions[basis] = dict(event_totals)
+        candidates = (
+            set(support_ids)
+            if obligation or data.supporting_corrective_event_ids
+            else set(state["event_ids"]) - original_events
+        )
+        supporting = sorted(
+            ident
+            for ident in candidates
+            if all(
+                contributions[basis].get(ident, 0) * expected.amount_cents > 0
+                for basis in BASES
+            )
+        )
+        if not supporting:
+            raise Problem(
+                "expected_balance",
+                "No selected correction carries this obligation or classification on both bases",
+                {
+                    "expected": expected.model_dump(),
+                    "selected_event_ids": support_ids,
+                    "contributions_by_basis": contributions,
+                },
+            )
+        if obligation:
+            # Party metadata from a different scope or a zero-net descendant is
+            # never evidence for the obligation being validated.
+            for ident in supporting:
+                _check_obligation(db, expected, account, get(db, m.Event, ident), obs)
+        used_support_ids.update(supporting)
+        support_mapping.append(
+            {
+                "expected": expected.model_dump(),
+                "supporting_events": [
+                    {
+                        "event_id": ident,
+                        "source_digest": digest(get(db, m.Event, ident).source),
+                        "effective_cents_by_basis": {
+                            basis: contributions[basis][ident] for basis in BASES
+                        },
+                        "registered_sources": [
+                            {"document_id": doc_id, "sha256": sha}
+                            for doc_id, sha in db.query(
+                                m.DocumentLink.document_id, m.DocumentLocation.sha256
+                            )
+                            .join(
+                                m.DocumentLocation,
+                                m.DocumentLocation.document_id
+                                == m.DocumentLink.document_id,
+                            )
+                            .filter(m.DocumentLink.event_id == ident)
+                            .distinct()
+                            .order_by(
+                                m.DocumentLink.document_id, m.DocumentLocation.sha256
+                            )
+                        ],
+                    }
+                    for ident in supporting
+                ],
+            }
+        )
+    if data.supporting_corrective_event_ids and set(support_ids) - used_support_ids:
+        fail(
+            "unused_support",
+            "Every selected correction must carry a supported economic balance",
+        )
     if any(reciprocal.values()) or any(
         roles != {"due_from", "due_to"} for roles in reciprocal_roles.values()
     ):
@@ -414,6 +509,10 @@ def validate_existing(db, data, actor):
     review.resolution = json.dumps(
         {
             "method": "validated_existing_correction",
+            "proof_version": 2,
+            "supporting_corrective_event_ids": sorted(support_ids),
+            "obligation_support": support_mapping,
+            "support_digest": digest(support_mapping),
             "evidence": data.evidence,
             "state_digest": state["state_digest"],
             "balances": [row.model_dump() for row in data.balances],
@@ -432,6 +531,9 @@ def validate_existing(db, data, actor):
         "review_id": review.id,
         "resolved_review_ids": [review.id],
         "validated_event_id": correction.id,
+        "supporting_corrective_event_ids": sorted(support_ids),
+        "obligation_support": support_mapping,
+        "support_digest": digest(support_mapping),
         "new_financial_events": 0,
         "bank_cash_delta_cents": 0,
         "source_movement_delta_cents": 0,

@@ -1003,3 +1003,50 @@ def test_legacy_unassigned_replacement_cannot_hide_behind_whole_account(
             ),
         )
     assert error.value.code == "replacement_deficit"
+
+
+@pytest.mark.parametrize("invalid", [None, "another_date", "borrow_other_fund"])
+def test_restoration_normalizes_only_genuine_receipt_fund_overlays(portfolio, invalid):
+    db, bank, alert, obs_id, receipt = receipt_case(portfolio)
+    holder = portfolio[1]
+    party = run(db, "create_party", code="LEGACY", name="Legacy beneficiary")[
+        "party_id"
+    ]
+    fund = run(
+        db,
+        "create_fund",
+        code="LEGACY",
+        holder_entity_id=holder,
+        beneficiary_id=party,
+        purpose="general",
+    )["fund_id"]
+    amount = 100001 if invalid == "borrow_other_fund" else 100000
+    journal(
+        db,
+        holder,
+        "2026-02-04" if invalid == "another_date" else "2026-02-03",
+        [
+            ln(bank, -amount),
+            ln(bank, amount, fund_id=fund),
+            ln(control(db, holder, "custody_liability"), -amount, fund_id=fund),
+            ln(control(db, holder, "suspense_credit"), amount),
+        ],
+        corrects_id=receipt,
+        source={"observation_id": obs_id},
+    )
+    before = financial_snapshot(db)
+    if invalid:
+        with pytest.raises(Problem) as error:
+            run(
+                db, "resolve_historical_shortage", **resolution_data(db, alert, receipt)
+            )
+        assert error.value.code == "restoration_lineage"
+    else:
+        result = run(
+            db, "resolve_historical_shortage", **resolution_data(db, alert, receipt)
+        )
+        proof = result["restoration_receipt"]
+        assert proof["physical_event_id"] == receipt
+        assert proof["normalized_attribution"][0]["fund_id"] == fund
+        assert proof["amount_cents"] == 100000
+    assert financial_snapshot(db) == before

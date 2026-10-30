@@ -31,6 +31,7 @@ from app.services.auth import (
     remember_this_company,
     signed_in_before_this_start,
     signed_in_to_another_company,
+    check_session_user,
 )
 from app.services.rate_limit import limiter
 from app.services.request_utils import client_ip as _client_ip
@@ -168,6 +169,16 @@ def auth_status(request: Request, db: Session = Depends(get_db)):
         request.session.clear()
         authenticated = False
     setup_needed = not password_is_set(db)
+    if authenticated:
+        session_state, current_role, current_version = check_session_user(
+            request.session
+        )
+        if session_state == "revoked":
+            request.session.clear()
+            authenticated = False
+        elif session_state == "ok":
+            request.session["role"] = current_role
+            request.session["session_version"] = current_version
     out = {
         "setup_needed": setup_needed,
         "authenticated": authenticated,
@@ -288,6 +299,7 @@ def _stash_user(request: Request, user) -> None:
     request.session["username"] = user.username
     request.session["display_name"] = user.display_name
     request.session["role"] = user.role
+    request.session["session_version"] = user.session_version
 
 
 @router.post("/login")

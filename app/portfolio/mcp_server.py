@@ -210,9 +210,13 @@ async def context() -> dict:
 
 
 @mcp.tool(annotations=READ)
-async def command_schemas() -> dict:
+async def command_schemas(operations: list[str] | None = None) -> dict:
     """Discover exact supported operation inputs. Never guess a field name."""
-    return await request("GET", "/commands")
+    return await request(
+        "GET",
+        "/commands",
+        params={"operations": ",".join(operations)} if operations is not None else None,
+    )
 
 
 @mcp.tool(annotations=READ)
@@ -534,9 +538,11 @@ async def owner_custody_state(item_id: int) -> dict:
 
 
 @mcp.tool(annotations=READ)
-async def storage_diagnostics() -> dict:
+async def storage_diagnostics(projection: str = "compact") -> dict:
     """Inspect SQLite storage and payload sizes without deleting or rewriting records."""
-    return await request("GET", "/storage-diagnostics")
+    return await request(
+        "GET", "/storage-diagnostics", params={"projection": projection}
+    )
 
 
 @mcp.tool(annotations=READ)
@@ -556,6 +562,98 @@ async def verification_export(
     if expected_book_digest is not None:
         params["expected_book_digest"] = expected_book_digest
     return await request("GET", "/verification-export", params=params)
+
+
+@mcp.tool(annotations=READ)
+async def mortgage_state(
+    observation_id: int,
+    debt_account_id: int,
+    instrument: str,
+    property_id: int | None = None,
+) -> dict:
+    """Read supported instrument debt and a fresh guard for posted-payment correction."""
+    return await request(
+        "GET",
+        "/mortgage-state",
+        params={
+            "observation_id": observation_id,
+            "debt_account_id": debt_account_id,
+            "instrument": instrument,
+            **({"property_id": property_id} if property_id else {}),
+        },
+    )
+
+
+@mcp.tool(annotations=READ)
+async def invoice_state(code: str) -> dict:
+    """Read supplier invoice identity, applications and guard before another card payment."""
+    return await request("GET", "/invoice-state", params={"code": code})
+
+
+@mcp.tool(annotations=READ)
+async def review_register(
+    after_id: int = 0,
+    limit: int = 100,
+    expected_book_digest: str | None = None,
+    status: str | None = None,
+    code: str | None = None,
+) -> dict:
+    """Page compact review status and exact proof hashes without large resolution cells."""
+    return await request(
+        "GET",
+        "/review-register",
+        params={key: value for key, value in locals().items() if value is not None},
+    )
+
+
+@mcp.tool(annotations=READ)
+async def proof_page(
+    kind: str,
+    identity: str,
+    offset: int = 0,
+    limit: int = 8192,
+    expected_digest: str | None = None,
+) -> dict:
+    """Recover exact request, proposal or review proof in digest-bound character pages."""
+    return await request(
+        "GET",
+        "/proof",
+        params={key: value for key, value in locals().items() if value is not None},
+    )
+
+
+@mcp.tool(annotations=READ)
+async def run_manifest(keys: list[str]) -> dict:
+    """Read canonical exact-key execution, proposal, review and attestation states."""
+    return await request("GET", "/run-manifest", params={"keys": json.dumps(keys)})
+
+
+@mcp.tool(annotations=READ)
+async def evidence_plan(observation_id: int) -> dict:
+    """Name scoped obligations, funding evidence and card identity conflicts without closing reviews."""
+    return await request(
+        "GET", "/evidence-plan", params={"observation_id": observation_id}
+    )
+
+
+@mcp.tool(annotations=READ)
+async def coverage_plan(account_id: int, start: str, end: str) -> dict:
+    """Plan missing sender/bank source intervals against current reconciliations."""
+    return await request(
+        "GET",
+        "/coverage-plan",
+        params={"account_id": account_id, "start": start, "end": end},
+    )
+
+
+@mcp.tool(annotations=READ)
+async def document_state(document_id: int, verify_local: bool = False) -> dict:
+    """Inspect preserved source locations; optionally hash registered local originals."""
+    return await request(
+        "GET",
+        "/document-state",
+        params={"document_id": document_id, "verify_local": verify_local},
+    )
 
 
 if __name__ == "__main__":

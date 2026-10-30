@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
+from app.routes._helpers import reject_null_updates
 from app.models.contacts import Customer
 from app.models.cost_codes import CostCode
 from app.models.jobs import Job
@@ -274,7 +275,7 @@ def create_job(data: JobCreate, db: Session = Depends(get_db)):
 @router.put("/{job_id}", response_model=JobResponse)
 def update_job(job_id: int, data: JobUpdate, db: Session = Depends(get_db)):
     job = _get(db, job_id)
-    changes = data.model_dump(exclude_unset=True)
+    changes = reject_null_updates(Job, data.model_dump(exclude_unset=True))
     customer_id = changes.get("customer_id", job.customer_id)
     if "customer_id" in changes and not db.get(Customer, customer_id):
         raise HTTPException(status_code=404, detail="Customer not found")

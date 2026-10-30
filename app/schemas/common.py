@@ -1,4 +1,5 @@
 import re
+from datetime import date as _date
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Annotated, Optional
 
@@ -10,6 +11,7 @@ from pydantic import (
     Field,
     PlainSerializer,
     StringConstraints,
+    field_validator,
 )
 
 # A required display name that cannot be blank.
@@ -86,6 +88,19 @@ def validate_non_negative_line(quantity, rate) -> None:
         raise ValueError("rate must be non-negative; use a credit memo for refunds")
 
 
+# Request date fields are bounded to this range. The engine computes a due
+# date as ``invoice.date + timedelta(days=30)`` (routes/invoices/helpers.py):
+# an invoice dated 9999-12-31 overflowed ``date.max`` and raised an uncaught
+# OverflowError — an HTTP 500. The lower bound catches the mirror case (a
+# document dated 0001-01-01, accepted before). 1900..2199 is wide enough for
+# any real document, hire date or birth date we will ever store, and keeps
+# date arithmetic clear of the type's edges. File importers (QuickBooks /
+# Xero / IIF / …) build ORM rows directly, not these request schemas, so
+# historical imports outside this window are unaffected.
+MIN_REQUEST_YEAR = 1900
+MAX_REQUEST_YEAR = 2199
+
+
 class StrictModel(BaseModel):
     """Base for every request body: unknown fields are a 422, not silence.
 
@@ -96,9 +111,37 @@ class StrictModel(BaseModel):
     caller supplied the data and was told it worked. ``extra="forbid"``
     turns that into an error naming the field. Response models keep the
     default; only what the client sends is checked.
+
+    ``allow_inf_nan=False`` is the second half of that posture: a float
+    field sent ``NaN`` or ``Infinity`` is a 422 here, not a time-bomb
+    downstream. Left on (the pydantic default), a NaN quantity/rate reached
+    ``Decimal(str(nan))`` and raised ``decimal.InvalidOperation`` (500); a
+    NaN payment amount became a NULL insert (IntegrityError, 500). Decimal
+    money fields already refused non-finite values; this extends the same
+    rule to the ~200 ``float`` fields in one place instead of per field.
+
+    The wildcard validator rejects the two hostile scalar shapes that slip
+    past type checks: a NUL byte (``\\x00``) in any string — stored silently
+    on SQLite, a 500 on PostgreSQL — and a date outside MIN/MAX_REQUEST_YEAR.
+    It is inherited by every request schema (and runs on their nested models
+    and list items), so one definition covers them all.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    @field_validator("*", mode="after")
+    @classmethod
+    def _reject_hostile_scalars(cls, value):
+        if isinstance(value, str):
+            if "\x00" in value:
+                raise ValueError("Text may not contain a NUL byte (\\x00).")
+        elif isinstance(value, _date):  # also datetime, a date subclass
+            if not (MIN_REQUEST_YEAR <= value.year <= MAX_REQUEST_YEAR):
+                raise ValueError(
+                    f"Date {value.isoformat()} is out of range; the year must "
+                    f"be between {MIN_REQUEST_YEAR} and {MAX_REQUEST_YEAR}."
+                )
+        return value
 
 
 def _as_percent(value) -> str:

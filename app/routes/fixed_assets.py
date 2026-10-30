@@ -13,6 +13,7 @@ from app.schemas.common import StrictModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.routes._helpers import reject_null_updates
 from app.models.fixed_assets import (
     DepreciationMethod,
     FixedAsset,
@@ -185,7 +186,9 @@ def update_type(type_id: int, data: AssetTypeUpdate, db: Session = Depends(get_d
     row = db.get(FixedAssetType, type_id)
     if not row:
         raise HTTPException(status_code=404, detail="Asset type not found")
-    for key, value in data.model_dump(exclude_unset=True).items():
+    for key, value in reject_null_updates(
+        FixedAssetType, data.model_dump(exclude_unset=True)
+    ).items():
         setattr(row, key, value)
     db.commit()
     db.refresh(row)
@@ -270,7 +273,7 @@ def update_asset(asset_id: int, data: AssetUpdate, db: Session = Depends(get_db)
         raise HTTPException(status_code=404, detail="Asset not found")
     if asset.status == FixedAssetStatus.DISPOSED:
         raise HTTPException(status_code=400, detail="Disposed assets are read-only")
-    fields = data.model_dump(exclude_unset=True)
+    fields = reject_null_updates(FixedAsset, data.model_dump(exclude_unset=True))
     if "purchase_price" in fields or "salvage_value" in fields:
         check_amounts(
             fields.get("purchase_price", asset.purchase_price),

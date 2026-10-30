@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.routes._helpers import reject_null_updates
 from app.models.email_templates import EmailTemplate
 from app.schemas.common import StrictModel
 from app.schemas.email_templates import (
@@ -181,7 +182,9 @@ def update_template(
     template = db.query(EmailTemplate).filter(EmailTemplate.id == template_id).first()
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
-    for key, val in data.model_dump(exclude_unset=True).items():
+    for key, val in reject_null_updates(
+        EmailTemplate, data.model_dump(exclude_unset=True)
+    ).items():
         setattr(template, key, val)
     db.commit()
     db.refresh(template)

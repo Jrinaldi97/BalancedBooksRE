@@ -581,6 +581,17 @@ def void_document_from_qbo(db: Session, qbo_type: str, qbo_id: str) -> str | Non
     return f"{noun} {invoice.invoice_number}"
 
 
+def current_invoice_for_import(db, invoice_id):
+    """Refresh the paid-total guard in a long-lived import session.
+
+    An invoice cached before a separate payment request must not hide that
+    payment and permit importing a new total below it. Flush our own pending
+    changes first, then lock and reload the authoritative row.
+    """
+    db.flush()
+    return db.get(Invoice, invoice_id, populate_existing=True, with_for_update=True)
+
+
 def paid_past_new_total(invoice, qbo_id, new_total) -> dict | None:
     """An invoice the QBO import made, changed in QuickBooks Online to a
     total below the payments recorded against it here. Neither the document

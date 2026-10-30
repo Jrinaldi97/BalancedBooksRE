@@ -14,7 +14,7 @@ from app.schemas.items import (
     InventoryAdjustmentRequest,
     LowStockResponse,
 )
-from app.routes._helpers import get_or_404
+from app.routes._helpers import get_or_404, reject_null_updates
 from app.services.inventory_service import record_adjustment, current_valuation
 
 router = APIRouter(prefix="/api/items", tags=["items"])
@@ -214,8 +214,9 @@ def update_item(item_id: int, data: ItemUpdate, db: Session = Depends(get_db)):
     # owned by the inventory ledger. Use /adjust instead.
     update_data.pop("quantity_on_hand", None)
     update_data.pop("avg_cost", None)
-    if "name" in update_data and update_data["name"] is None:
-        update_data.pop("name")  # an item always has a name
+    # An item always has a name (and an item_type): an explicit null on either
+    # is refused with a 422 rather than the IntegrityError 500 it once caused.
+    reject_null_updates(Item, update_data)
     # A rename, or bringing an inactive item back, must not make a second
     # active item of the same name. An edit that leaves the name alone is
     # not refused, so two duplicates made before this check can still be

@@ -161,6 +161,8 @@ def test_the_helper_is_the_only_way_lines_are_replaced():
         "app/routes/bills.py",
         "app/routes/invoices/crud.py",
         "app/routes/invoices/helpers.py",
+        "app/services/qbo_import.py",  # the QBO re-import of a changed sale (W-1)
+        "app/routes/estimates.py",
     ):
         src = (root / rel).read_text(encoding="utf-8")
         assert "audited_bulk_delete(" in src, rel
@@ -168,3 +170,47 @@ def test_the_helper_is_the_only_way_lines_are_replaced():
     assert ".filter(BillLine.bill_id == bill.id).delete()" not in bills
     crud = (root / "app/routes/invoices/crud.py").read_text(encoding="utf-8")
     assert "InvoiceLine.invoice_id == invoice_id).delete()" not in crud
+    qbo = (root / "app/services/qbo_import.py").read_text(encoding="utf-8")
+    assert "InvoiceLine.invoice_id == invoice.id).delete()" not in qbo
+    est = (root / "app/routes/estimates.py").read_text(encoding="utf-8")
+    assert "EstimateLine.estimate_id == estimate_id).delete()" not in est
+    # the rows go through the session, not a bulk DELETE that leaves them loaded
+    audit = (root / "app/services/audit.py").read_text(encoding="utf-8")
+    helper = audit.split("def audited_bulk_delete")[1].split("\ndef ")[0]
+    assert "query.delete(" not in helper and "db.delete(row)" in helper
+
+
+def test_an_edit_leaves_no_stale_rows_in_the_session(
+    client, seed_accounts, seed_customer
+):
+    """The helper logged each row, then bulk-deleted with
+    synchronize_session=False, so the rows stayed in the session; SQLite
+    reused their ids for the new lines and SQLAlchemy warned "Identity map
+    already had an identity" on every edit — 160 of the suite's warnings
+    (2.23.0 gate, NEW-91). Deleting through the session, none."""
+    import warnings
+
+    from sqlalchemy.exc import SAWarning
+
+    inv = client.post(
+        "/api/invoices",
+        json={
+            "customer_id": seed_customer.id,
+            "date": "2026-07-01",
+            "lines": [
+                {"description": "one", "quantity": 1, "rate": "200.00"},
+                {"description": "two", "quantity": 1, "rate": "500.00"},
+            ],
+        },
+    )
+    assert inv.status_code == 201, inv.text
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for rate in ("450.00", "475.00"):
+            r = client.put(
+                f"/api/invoices/{inv.json()['id']}",
+                json={"lines": [{"description": "one", "quantity": 1, "rate": rate}]},
+            )
+            assert r.status_code == 200, r.text
+    stale = [w for w in caught if issubclass(w.category, SAWarning)]
+    assert stale == [], [str(w.message) for w in stale]

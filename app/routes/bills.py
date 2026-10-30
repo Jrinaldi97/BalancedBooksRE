@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.database import get_db
-from app.routes._helpers import clamp_pagination
+from app.routes._helpers import clamp_pagination, reject_null_updates
 from app.routes.invoices.helpers import _due_date_from_terms
 from app.models.bills import Bill, BillLine, BillStatus
 from app.models.contacts import Vendor
@@ -429,7 +429,9 @@ def update_bill(bill_id: int, data: BillUpdate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Cannot edit a voided bill")
     check_closing_date(db, bill.date)
 
-    update_data = data.model_dump(exclude_unset=True, exclude={"lines"})
+    update_data = reject_null_updates(
+        Bill, data.model_dump(exclude_unset=True, exclude={"lines"})
+    )
 
     vendor = bill.vendor
     if "vendor_id" in update_data and update_data["vendor_id"] != bill.vendor_id:

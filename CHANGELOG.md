@@ -5,6 +5,27 @@ Notable changes between releases. Format roughly follows
 used during development is captured here so the README can stay focused
 on what the software does, not on what sprint shipped what.
 
+## BalancedBooksRE 0.6.0 — October 30, 2026
+
+Add explicit multi-event correction validation, capacity-checked transfer
+components, source-preserving posted mortgage corrections, and atomic supplier
+invoice/card timing. Add issuer alias replacement evidence, exact relocated-file
+checks, coverage/evidence plans, compact proof paging, review registers and a
+canonical run manifest. Retain all accounting/evidence guards and historical rows.
+
+Batch source-lineage reads use indexed unions. Revision counters update atomically
+without generating one redundant audit snapshot per entity. Native storage reads
+can omit expensive full payload scans. Schema bb0005 adds evidence fields and indexes;
+bb0006 adds revocable browser sessions.
+
+Selectively adapt SlowBooks Pro changes through 2.31.1: atomic balance updates,
+audit redaction/deletion tracking, strict validators, protected static uploads,
+permanent token revocation, immediate session revocation after user security
+changes, current Stripe SDK payloads, typed opening-equity
+lookup and bounded Mac packaging retries. Mac case-insensitive paths are covered.
+Long-lived QBO imports refresh paid invoices before applying changed source totals.
+See docs/bbre-0.6.0-engineering.md for provenance, scope and validation.
+
 ## BalancedBooksRE 0.5.0 — October 30, 2026
 
 Add audited review reopening, source-backed historical beneficiary/return
