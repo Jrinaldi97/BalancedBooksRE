@@ -26,7 +26,7 @@ class StructuredErrorMCP(FastMCP):
             try:
                 payload = json.loads(message[message.index("{") :])
             except (ValueError, TypeError):
-                raise
+                raise exc
             if not isinstance(payload, dict) or payload.get("ok") is not False:
                 raise
             return CallToolResult(
