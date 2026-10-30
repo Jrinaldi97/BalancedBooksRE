@@ -316,7 +316,13 @@ def main():
     from app.main import app
 
     server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=args.port, log_level="info")
+        uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=args.port,
+            log_level="info",
+            access_log=not args.mcp,
+        )
     )
     if args.no_window and not args.mcp:
         server.run()
