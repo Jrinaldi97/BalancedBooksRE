@@ -132,6 +132,24 @@ def shortage_assessment(db, review_id, through=None, corrective_event_ids=None):
     result["allocation_evidence"] = allocation_evidence(db, candidate_ids, through)
     if selected is not None:
         result["corrective_event_ids"] = selected
+    result["resolution_contract"] = {
+        "assessment_variant": (
+            "correction_set" if selected is not None else "single_event"
+        ),
+        "allowed_reasons": (
+            ["source_allocation_set_corrected"]
+            if selected is not None
+            else [
+                "source_allocation_corrected",
+                "import_order_artifact",
+                "supported_restoration",
+            ]
+        ),
+        "event_field": (
+            "corrective_event_ids" if selected is not None else "corrective_event_id"
+        ),
+        "coverage_instruction": "Use a cutoff covered by actual reconciliations; no coverage is inferred beyond their endpoint.",
+    }
     result["assessment_digest"] = digest(result)
     return result
 

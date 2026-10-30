@@ -3712,19 +3712,19 @@ OPERATIONS["reopen_review"] = reopen_review
 
 def correct_posted_pool_joint(db, data, actor):
     from app.portfolio.observation_state import observation_state
-    from app.portfolio.reports import ledger
 
     if db.info.get("joint_pool_scopes") is not None:
         fail("joint_pool", "Nested joint corrections are unsupported")
     ids = [part.observation_id for part in data.corrections]
     if len(set(ids)) != len(ids):
         fail("joint_pool", "Each observation may appear only once")
-    dates = {get(db, m.BankObservation, ident).date for ident in ids}
-    if len(dates) != 1:
-        fail(
-            "joint_pool",
-            "Joint correction requires one actual bank date; use chronological groups",
-        )
+    from app.portfolio.ledger_snapshot import LedgerSnapshot
+
+    observations = {ident: get(db, m.BankObservation, ident) for ident in ids}
+    before = {
+        account_id: LedgerSnapshot(db, date.max, account_id=account_id)
+        for account_id in {obs.account_id for obs in observations.values()}
+    }
     # Validate every submitted state against the same pre-operation snapshot.
     for part in data.corrections:
         if (
@@ -3735,14 +3735,25 @@ def correct_posted_pool_joint(db, data, actor):
     results = []
     db.info["joint_pool_scopes"] = set()
     try:
-        for part in data.corrections:
+        for part in sorted(
+            data.corrections,
+            key=lambda part: (
+                observations[part.observation_id].date,
+                part.observation_id,
+            ),
+        ):
             results.append(pool_activity(db, part, actor))
         db.flush()
-        for account_id, fund_id, start in sorted(
-            db.info["joint_pool_scopes"], key=repr
-        ):
-            # Check every later effective-allocation boundary, not just today's
-            # projection of history. No transient balance is treated as funding.
+        retained = []
+        after = {
+            account_id: LedgerSnapshot(db, date.max, account_id=account_id)
+            for account_id in before
+        }
+        starts = {}
+        for account_id, fund_id, start in db.info["joint_pool_scopes"]:
+            key = (account_id, fund_id)
+            starts[key] = min(start, starts.get(key, start))
+        for (account_id, fund_id), start in sorted(starts.items(), key=repr):
             boundaries = {start, date.max}
             boundaries.update(
                 day
@@ -3751,29 +3762,51 @@ def correct_posted_pool_joint(db, data, actor):
                 .distinct()
             )
             for cutoff in sorted(boundaries):
-                daily = defaultdict(int)
-                for row in ledger(db, cutoff, account_id=account_id):
-                    if fund_id is None or row.get("fund_id") == fund_id:
-                        daily[row["date"]] += row["debit_cents"] - row["credit_cents"]
-                running = 0
-                for day, amount in sorted(daily.items()):
-                    running += amount
-                    if day >= start.isoformat() and running < 0:
-                        fail(
-                            "allocation_source_deficit",
-                            "Joint correction leaves unsupported dated holdings; the entire group was rejected",
-                        )
-                if running < 0:
-                    fail(
-                        "allocation_source_deficit",
-                        "Joint correction leaves unsupported holdings",
-                    )
+                for basis in ("accrual", "modified_cash_bank_posting"):
+                    daily = []
+                    for packet in (before[account_id], after[account_id]):
+                        amounts = defaultdict(int)
+                        for row in packet.project(cutoff, basis=basis):
+                            if fund_id is None or row.get("fund_id") == fund_id:
+                                amounts[row["date"]] += (
+                                    row["debit_cents"] - row["credit_cents"]
+                                )
+                        daily.append(amounts)
+                    old = new = 0
+                    for day in sorted(
+                        set(daily[0]) | set(daily[1]) | {start.isoformat()}
+                    ):
+                        old += daily[0][day]
+                        new += daily[1][day]
+                        if day < start.isoformat():
+                            continue
+                        details = {
+                            "account_id": account_id,
+                            "fund_id": fund_id,
+                            "date": day,
+                            "projection_as_of": cutoff.isoformat(),
+                            "basis": basis,
+                            "before_cents": old,
+                            "after_cents": new,
+                            "delta_cents": new - old,
+                            "physical_cash_delta_cents": 0,
+                            "observation_ids": ids,
+                        }
+                        if new < min(old, 0):
+                            raise Problem(
+                                "allocation_source_deficit",
+                                "Joint correction creates or worsens dated unsupported holdings; entire group rejected",
+                                details,
+                            )
+                        if new < 0 and basis == "accrual" and cutoff == date.max:
+                            retained.append(details)
     finally:
         db.info.pop("joint_pool_scopes", None)
     return {
         "results": results,
         "event_ids": [r["event_id"] for r in results],
         "atomic": True,
+        "retained_existing_deficits": retained,
         "bank_cash_delta_cents": 0,
         "evidence": data.evidence,
     }

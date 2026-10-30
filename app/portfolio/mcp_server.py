@@ -13,7 +13,30 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-mcp = FastMCP(
+import json
+from mcp.types import CallToolResult, TextContent
+
+
+class StructuredErrorMCP(FastMCP):
+    async def call_tool(self, name, arguments):
+        try:
+            return await super().call_tool(name, arguments)
+        except ToolError as exc:
+            message = str(exc)
+            try:
+                payload = json.loads(message[message.index("{") :])
+            except (ValueError, TypeError):
+                raise
+            if not isinstance(payload, dict) or payload.get("ok") is not False:
+                raise
+            return CallToolResult(
+                isError=True,
+                structuredContent=payload,
+                content=[TextContent(type="text", text=json.dumps(payload))],
+            )
+
+
+mcp = StructuredErrorMCP(
     "BalancedBooksRE",
     instructions=(
         "Read context and command schemas first. Amounts are integer USD cents. "

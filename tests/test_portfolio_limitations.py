@@ -558,3 +558,75 @@ def test_plain_text_rejection_preserves_diagnostic(monkeypatch):
     result = json.loads(str(caught.value))
     assert result["execution_state"] == "rejected"
     assert "allocation_source_deficit" in result["detail"]
+
+
+def test_joint_does_not_blame_unchanged_later_deficit(correction_pool):
+    db, holder, bank, (unknown, second, client) = correction_pool
+    ids = bank_rows(
+        db,
+        bank,
+        [
+            dict(date="2026-02-01", amount_cents=10000),
+            dict(date="2026-02-01", amount_cents=-10000),
+            dict(date="2026-03-01", amount_cents=-500),
+        ],
+    )
+    for obs in ids:
+        run(db, "post_bank", observation_id=obs, fund_id=unknown, rationale="Actual")
+    result = run(
+        db,
+        "correct_posted_pool_joint",
+        corrections=[pool_correction(db, i, client) for i in ids[:2]],
+        evidence="Exact pair",
+    )
+    assert result["retained_existing_deficits"]
+    assert balance(db, bank, date.max, unknown) == -500
+
+
+def test_joint_dated_group_preserves_real_intermediate_deficit_guard(correction_pool):
+    db, holder, bank, (unknown, second, client) = correction_pool
+    ids = bank_rows(
+        db,
+        bank,
+        [
+            dict(date="2026-02-01", amount_cents=-500),
+            dict(date="2026-02-02", amount_cents=500),
+        ],
+    )
+    for obs in ids:
+        run(db, "post_bank", observation_id=obs, fund_id=unknown, rationale="Actual")
+    before = financial_snapshot(db)
+    with pytest.raises(Problem) as error:
+        run(
+            db,
+            "correct_posted_pool_joint",
+            corrections=[pool_correction(db, i, client) for i in ids],
+            evidence="Pair",
+        )
+    assert error.value.details["date"] == "2026-02-01"
+    assert error.value.details["fund_id"] == client
+    assert financial_snapshot(db) == before
+
+
+def test_mcp_error_is_structured_and_marked_failed():
+    import asyncio, json
+    from app.portfolio.mcp_server import StructuredErrorMCP
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    server = StructuredErrorMCP("test")
+
+    @server.tool()
+    async def rejected() -> dict:
+        raise ToolError(
+            json.dumps(
+                {
+                    "ok": False,
+                    "status": 409,
+                    "detail": {"code": "allocation_source_deficit"},
+                }
+            )
+        )
+
+    result = asyncio.run(server.call_tool("rejected", {}))
+    assert result.isError
+    assert json.loads(result.content[0].text) == result.structuredContent

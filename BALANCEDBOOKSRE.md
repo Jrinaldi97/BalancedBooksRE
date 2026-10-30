@@ -107,3 +107,16 @@ proof, expiring attachment links, OCR accuracy and pending host permissions are
 not settled by these software changes. Existing UTF-8/BOM and CP1252 CSV handling,
 multiline parsing, incremental hashes, connection guards and preview identity
 protection remain in place. Immutable SQLite mode is only for closed snapshots.
+
+
+## Follow-up repair (0.5.1)
+
+Joint corrections now accept multiple actual bank dates, processed chronologically
+inside one atomic operation. Final holdings are compared with the immutable
+pre-operation projection on both bases. New or worsened negative holdings reject
+the entire group with bank, fund, date, projection cutoff and before/after amounts.
+Unchanged pre-existing deficits remain disclosed in retained_existing_deficits;
+this does not resolve shortage reviews or infer funding.
+Shortage assessments expose their resolution_contract and the input schema
+explains single-event versus candidate-set digest requirements. Native MCP
+rejections preserve isError and expose structuredContent plus plain JSON text.

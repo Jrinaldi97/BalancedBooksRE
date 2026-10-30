@@ -605,7 +605,10 @@ CONTRACTS["validate_existing_correction"] = ValidateExistingCorrectionInput
 
 class HistoricalShortageResolution(Input):
     review_id: Id
-    expected_assessment_digest: str = Field(min_length=1)
+    expected_assessment_digest: str = Field(
+        min_length=1,
+        description="For single-event reasons use shortage_assessment without corrective_event_ids. For source_allocation_set_corrected use the same candidate list in both assessment and resolution.",
+    )
     as_of: date
     corrective_event_id: Id | None = None
     corrective_event_ids: list[Id] | None = Field(
