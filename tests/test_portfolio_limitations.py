@@ -609,7 +609,8 @@ def test_joint_dated_group_preserves_real_intermediate_deficit_guard(correction_
 
 
 def test_mcp_error_is_structured_and_marked_failed():
-    import asyncio, json
+    import asyncio
+    import json
     from app.portfolio.mcp_server import StructuredErrorMCP
     from mcp.server.fastmcp.exceptions import ToolError
 
