@@ -19,6 +19,24 @@ from app.services.terminology import document_reference, terms_for
 stripe.enable_telemetry = False
 
 
+def _plain(obj):
+    """A Stripe payload as plain dicts and lists, whatever the SDK handed us.
+
+    stripe-python 8+ returns StripeObjects that are no longer dicts: they
+    index like one (``session["id"]``) but have no ``.get`` (2.30.0 gate
+    W-45, "'get' is a dict method, but a Session is not a dict"). Older
+    SDKs returned dict subclasses, and the tests hand in dicts. Every
+    reader below takes what this returns, so it reads the same under any
+    SDK within the requirements pin."""
+    if hasattr(obj, "to_dict") and not isinstance(obj, dict):
+        obj = obj.to_dict()
+    if isinstance(obj, dict):
+        return {k: _plain(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_plain(v) for v in obj]
+    return obj
+
+
 class StripeProvider(PaymentProvider):
     name = "stripe"
     display_name = "Stripe"
@@ -89,8 +107,8 @@ class StripeProvider(PaymentProvider):
         if event["type"] != "checkout.session.completed":
             return None
 
-        session = event["data"]["object"]
-        amount_cents = session.get("amount_total", 0)
+        session = _plain(event["data"]["object"])
+        amount_cents = session.get("amount_total") or 0
         return PaymentResult(
             status="paid",
             external_id=session["id"],
@@ -103,7 +121,7 @@ class StripeProvider(PaymentProvider):
         self, external_id: str, settings: Mapping[str, str]
     ) -> PaymentResult:
         stripe.api_key = settings["stripe_secret_key"]
-        session = stripe.checkout.Session.retrieve(external_id)
+        session = _plain(stripe.checkout.Session.retrieve(external_id))
         paid = session.get("payment_status") == "paid"
         cancelled = session.get("status") == "expired"
         amount_cents = session.get("amount_total") or 0

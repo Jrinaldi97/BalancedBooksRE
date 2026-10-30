@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
 
 from app.database import get_db
-from app.routes._helpers import clamp_pagination
+from app.routes._helpers import clamp_pagination, reject_null_updates
 from app.models.invoices import Invoice, InvoiceLine, InvoiceStatus
 from app.models.items import Item
 from app.models.contacts import Customer
@@ -274,8 +274,9 @@ def update_invoice(invoice_id: int, data: InvoiceUpdate, db: Session = Depends(g
     check_closing_date(db, invoice.date)
     words = terms_from_db(db)
 
-    update_data = data.model_dump(
-        exclude_unset=True, exclude={"lines", "allow_zero_total"}
+    update_data = reject_null_updates(
+        Invoice,
+        data.model_dump(exclude_unset=True, exclude={"lines", "allow_zero_total"}),
     )
     # What the edit changes — the customer, the header's job, a line's job —
     # must leave the invoice on its customer's jobs (NEW-36); what it leaves

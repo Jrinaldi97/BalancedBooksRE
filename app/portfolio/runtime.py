@@ -172,6 +172,40 @@ def empty_verification():
     }
 
 
+def compact_proofs(output, omitted):
+    """Keep exact proof identity and scalar findings; recover full nested evidence."""
+    from app.portfolio.service import digest
+
+    for key in (
+        "assessment",
+        "allocation_causal_proof",
+        "restoration_receipt",
+        "obligation_support",
+    ):
+        value = output.get(key)
+        if value is None:
+            continue
+        size = len(json.dumps(value, default=str, separators=(",", ":")).encode())
+        if size <= 4096:
+            continue
+        summary = {}
+        if isinstance(value, dict):
+            summary = {
+                name: item
+                for name, item in value.items()
+                if item is None
+                or isinstance(item, (int, bool))
+                or (isinstance(item, str) and len(item) <= 200)
+            }
+        output.setdefault("proof_summaries", {})[key] = {
+            "digest": digest(value),
+            "json_bytes": size,
+            "item_count": len(value),
+            "summary": summary,
+        }
+        _omit(output, (key,), "", omitted)
+
+
 def operation_result(result, execution_state="committed", projection="full"):
     """API boundary states: call 'committed' only after the transaction commits."""
     from app.portfolio.service import digest
@@ -190,6 +224,7 @@ def operation_result(result, execution_state="committed", projection="full"):
     )
     if projection == "compact":
         omitted = []
+        compact_proofs(output, omitted)
         for i, transition in enumerate(
             output.get("review_lifecycle", {}).get("transitions", [])
         ):

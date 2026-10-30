@@ -105,8 +105,53 @@ def restoration_receipt(db, assessment, selected):
             line_scope.fund_id if line_scope else None,
         )
         overlays[key] = overlays.get(key, 0) + cents(line.debit) - cents(line.credit)
+    normalized = None
     if any(overlays.values()):
-        fail("restoration_lineage", "Receipt ancestry has additional bank movements")
+        # A dated, zero-net legacy attribution can move the original receipt
+        # between fund dimensions without adding any physical bank movement.
+        # Use the same strict source-family normalizer as posted corrections;
+        # never net unrelated events, accounts, dates or observations together.
+        from types import SimpleNamespace
+        from app.portfolio.cash_lineage import normalized_cash
+        from app.portfolio.service import Problem
+
+        original_ref = SimpleNamespace(
+            id=obs.id,
+            event_id=selected.id,
+            account_id=obs.account_id,
+            date=obs.date,
+            amount_cents=obs.amount_cents,
+        )
+        try:
+            normalized, _ = normalized_cash(
+                db, original_ref, {"event_ids": sorted(events)}
+            )
+        except Problem as exc:
+            fail(
+                "restoration_lineage",
+                str(exc),
+                {
+                    "observation_id": obs.id,
+                    "selected_event_id": selected.id,
+                    "source_event_ids": sorted(events),
+                    "blocking_scopes": [
+                        {
+                            "event_id": key[0],
+                            "account_id": key[1],
+                            "fund_id": key[2],
+                            "amount_cents": amount,
+                        }
+                        for key, amount in overlays.items()
+                        if amount
+                    ],
+                },
+            )
+        if any(row["credit_cents"] for row in normalized):
+            fail(
+                "restoration_lineage",
+                "Receipt attribution cannot borrow from another fund",
+                {"effective_components": normalized},
+            )
     classification = get(db, m.Event, obs.event_id)
     if classification.id != selected.id:
         descendants = {selected.id}
@@ -176,8 +221,9 @@ def restoration_receipt(db, assessment, selected):
     scoped = [r for r in rows if fund_id is None or r["fund_id"] == fund_id]
     incoming = sum(
         r["debit_cents"] - r["credit_cents"]
-        for r in scoped
-        if r["line_id"] == originals[0][0].id
+        for r in (normalized if normalized is not None else scoped)
+        if (fund_id is None or r["fund_id"] == fund_id)
+        and (normalized is not None or r["line_id"] == originals[0][0].id)
     )
     if incoming != obs.amount_cents:
         fail(
@@ -231,6 +277,7 @@ def restoration_receipt(db, assessment, selected):
         "restoration_date": obs.date.isoformat(),
         "balance_before_receipt_cents": before,
         "balance_after_receipt_cents": closing,
+        "normalized_attribution": normalized,
     }
     proof["episode_id"] = digest(
         {

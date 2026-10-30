@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.routes._helpers import reject_null_updates
 from app.routes.invoices.helpers import refuse_zero_total, resolve_line_taxable
 from app.models.recurring import RecurringInvoice, RecurringInvoiceLine
 from app.models.contacts import Customer
@@ -129,7 +130,9 @@ def update_recurring(rec_id: int, data: RecurringUpdate, db: Session = Depends(g
         raise HTTPException(status_code=404, detail="Recurring invoice not found")
     if "end_date" in data.model_fields_set:
         _refuse_end_before_start(rec.start_date, data.end_date)
-    changes = data.model_dump(exclude_unset=True, exclude={"lines"})
+    changes = reject_null_updates(
+        RecurringInvoice, data.model_dump(exclude_unset=True, exclude={"lines"})
+    )
     # A changed job must be the schedule's customer's (NEW-36); a job sent
     # unchanged, or left alone, is not judged (the lines carry none).
     refuse_other_customers_jobs_on_edit(db, rec, changes, None, _schedule_noun(db))

@@ -263,6 +263,14 @@ def test_collector_finds_something():
 # - One-shot seeds run once during setup, not from the running SPA
 # - Legacy paths superseded by newer endpoints (kept for backwards compat)
 _INTENTIONAL_BACKEND_ONLY: set[tuple[str, str]] = {
+    ("GET", "/api/portfolio/review-register"),  # Compact native audit export.
+    ("GET", "/api/portfolio/proof"),  # Digest-bound native proof recovery.
+    ("GET", "/api/portfolio/run-manifest"),  # Exact-key native continuation state.
+    ("GET", "/api/portfolio/evidence-plan"),  # Native evidence requests.
+    ("GET", "/api/portfolio/coverage-plan"),  # Native source import planning.
+    ("GET", "/api/portfolio/document-state"),  # Native source identity checks.
+    ("GET", "/api/portfolio/invoice-state"),  # Agent supplier invoice guard.
+    ("GET", "/api/portfolio/mortgage-state"),  # Agent debt-state guard.
     # Machine interface called by app/portfolio/mcp_server.py, outside the SPA.
     ("GET", "/api/portfolio/observations/{ident}/state"),
     ("GET", "/api/portfolio/observation-states"),

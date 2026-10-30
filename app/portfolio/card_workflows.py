@@ -65,8 +65,34 @@ def add_card_alias(db, data, actor):
             "card_alias",
             "An issuer alias cannot identify two cards or be silently reassigned",
         )
+    if data.replaces_alias_id:
+        predecessor = svc.get(db, m.CardAlias, data.replaces_alias_id)
+        proof = data.replacement_evidence
+        if (
+            predecessor.card_id != card.id
+            or predecessor.issuer != card.issuer
+            or data.start <= predecessor.start
+        ):
+            svc.fail(
+                "card_alias_lineage",
+                "Replacement must follow an earlier alias of this same issuer account",
+            )
+        if (
+            not db.query(m.DocumentLocation)
+            .filter_by(document_id=proof.document_id, sha256=proof.sha256)
+            .first()
+        ):
+            svc.fail(
+                "card_alias_evidence",
+                "Register the exact issuer replacement evidence first",
+            )
     row = m.CardAlias(
-        **data.model_dump(exclude={"alias"}),
+        **data.model_dump(exclude={"alias", "replacement_evidence"}),
+        replacement_evidence=(
+            data.replacement_evidence.model_dump()
+            if data.replacement_evidence
+            else None
+        ),
         alias=alias,
         issuer=card.issuer,
         actor=actor,
@@ -380,9 +406,15 @@ def _cost_lines(db, card, components, *, refund=False):
                     "card_cost_account",
                     "Choose an ordinary cost or asset account; protected settlement controls need their own workflow",
                 )
-            journals[target_entity].append(
-                svc.line(component["account_id"], amount, **dims)
-            )
+            if component.get("invoice_item_id") and not refund:
+                invoice_dims = {**dims, "item": component["invoice_item"]}
+                journals[target_entity].append(
+                    svc.line(component["invoice_control_id"], amount, **invoice_dims)
+                )
+            else:
+                journals[target_entity].append(
+                    svc.line(component["account_id"], amount, **dims)
+                )
             if target.role in {"expense", "cogs"}:
                 management.append(
                     s.ManagementInput(
@@ -441,6 +473,14 @@ def classify_card_purchase(db, data, actor, *, credit=False):
     if len({c.key for c in data.components}) != len(data.components):
         svc.fail("card_components", "Component keys must be unique")
     components = []
+    invoice_events = []
+    invoice_codes = [part.invoice.code for part in data.components if part.invoice]
+    if len(set(invoice_codes)) != len(invoice_codes):
+        svc.fail(
+            "invoice_identity", "Combine each invoice's payment into one component"
+        )
+    from app.portfolio.card_invoices import prepare_invoice, payment_adjustments
+
     for part in data.components:
         component = part.model_dump(mode="json")
         if part.beneficiary_kind == "company":
@@ -470,6 +510,21 @@ def classify_card_purchase(db, data, actor, *, credit=False):
             component["entity_id"] = card.entity_id
         component["item"] = f"card:{data.code}:{part.key}"
         component["date"] = obs.date.isoformat()
+        if part.invoice:
+            if credit:
+                svc.fail(
+                    "invoice_timing",
+                    "Use a linked refund for a previously invoiced purchase",
+                )
+            invoice_events.extend(prepare_invoice(db, component, obs.date, actor))
+        if (
+            part.recognition_policy == "funded_deposit"
+            and svc.scope(db, part.account_id, component["entity_id"]).role != "asset"
+        ):
+            svc.fail(
+                "deposit_account",
+                "An actually funded supplier deposit requires an asset account",
+            )
         components.append(component)
     journals, management = _cost_lines(db, card, components, refund=credit)
     journals[card.entity_id] = (
@@ -494,6 +549,7 @@ def classify_card_purchase(db, data, actor, *, credit=False):
                 for entity, lines in journals.items()
             ],
             management=management,
+            adjustments=payment_adjustments(components, obs.date),
             observed=True,
         ),
         actor,
@@ -514,6 +570,15 @@ def classify_card_purchase(db, data, actor, *, credit=False):
             db.add(item)
             db.flush()
             component["item_id"] = item.id
+    for component in components:
+        if component.get("invoice_item_id"):
+            db.add(
+                m.ItemApplication(
+                    item_id=component["invoice_item_id"],
+                    event_id=result["event_id"],
+                    amount_cents=component["amount_cents"],
+                )
+            )
     closed = _finish(db, source, result, data.evidence, components)
     activity = m.CardActivity(
         code=data.code,
@@ -532,6 +597,18 @@ def classify_card_purchase(db, data, actor, *, credit=False):
     return {
         **result,
         "card_activity_id": activity.id,
+        "event_ids": [*invoice_events, result["event_id"]],
+        "invoice_applications": [
+            {
+                "item_id": c["invoice_item_id"],
+                "applied_cents": c["amount_cents"],
+                "invoice_date": c["invoice"]["invoice_date"],
+                "issuer_date": obs.date.isoformat(),
+                "recognition_policy": c["recognition_policy"],
+            }
+            for c in components
+            if c.get("invoice_item_id")
+        ],
         "resolved_review_ids": closed,
         "source_kind": "card_liability",
         "bank_cash_delta_cents": 0,
@@ -1272,6 +1349,45 @@ def card_state(db, card_id, through=None):
             )
         supported_end = row.end
         valid.append(row.id)
+    uncovered = []
+    reasons = []
+    if not valid:
+        reasons.append("no_valid_issuer_coverage")
+    if expected_start is None:
+        reasons.append("opening_coverage_start_unknown")
+    if invalid:
+        reasons.append("recorded_coverage_no_longer_valid")
+    if gaps:
+        reasons.append("uncovered_leading_or_internal_period")
+        uncovered.extend(
+            {
+                **gap,
+                "kind": (
+                    "leading"
+                    if gap["start"]
+                    == (expected_start.isoformat() if expected_start else None)
+                    else "internal"
+                ),
+            }
+            for gap in gaps
+        )
+    if supported_end and supported_end < through:
+        reasons.append("uncovered_trailing_period")
+        uncovered.append(
+            {
+                "kind": "trailing",
+                "start": (supported_end + timedelta(days=1)).isoformat(),
+                "end": through.isoformat(),
+            }
+        )
+    elif not supported_end:
+        uncovered.append(
+            {
+                "kind": "entire_requested_period",
+                "start": expected_start.isoformat() if expected_start else None,
+                "end": through.isoformat(),
+            }
+        )
     result = {
         "card": svc.values(card),
         "as_of": through.isoformat(),
@@ -1283,11 +1399,25 @@ def card_state(db, card_id, through=None):
         ],
         "book_liability_cents": -svc.balance(db, card.account_id, through),
         "coverage_current": bool(
-            valid and not gaps and not invalid and supported_end == through
+            valid
+            and not gaps
+            and not invalid
+            and expected_start
+            and supported_end == through
         ),
         "coverage_ids": valid,
         "invalid_coverage_ids": invalid,
         "coverage_gaps": gaps,
+        "coverage_status_reasons": reasons,
+        "uncovered_intervals": uncovered,
+        "historical_coverage_valid": bool(valid and not invalid),
+        "current_balance_certified": bool(
+            valid
+            and not gaps
+            and not invalid
+            and expected_start
+            and supported_end == through
+        ),
         "supported_start": supported_start.isoformat() if supported_start else None,
         "supported_end": supported_end.isoformat() if supported_end else None,
         "coverage_scope": "Only the exact reviewed issuer periods; aliases and payment classification do not establish opening coverage.",

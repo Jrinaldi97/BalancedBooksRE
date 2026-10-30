@@ -408,6 +408,7 @@ def _reverse_and_delete_journal(db: Session, transaction_id: int):
     rebuild.
     """
     from app.models.transactions import TransactionLine
+    from app.services.accounting import apply_balance_deltas
     from app.services.audit import audited_bulk_delete
 
     old_lines = (
@@ -415,13 +416,20 @@ def _reverse_and_delete_journal(db: Session, transaction_id: int):
         .filter(TransactionLine.transaction_id == transaction_id)
         .all()
     )
+    # Aggregate the reversal per account and apply atomically, the same way
+    # the posting path does, so this can't lose a concurrent update.
+    balance_deltas: dict = {}
     for ol in old_lines:
         account = db.query(Account).filter(Account.id == ol.account_id).first()
         if account:
             if account.account_type.value in ("asset", "expense", "cogs"):
-                account.balance -= ol.debit - ol.credit
+                delta = -(ol.debit - ol.credit)
             else:
-                account.balance -= ol.credit - ol.debit
+                delta = -(ol.credit - ol.debit)
+            balance_deltas[account.id] = (
+                balance_deltas.get(account.id, Decimal("0")) + delta
+            )
+    apply_balance_deltas(db, balance_deltas)
     audited_bulk_delete(
         db,
         db.query(TransactionLine).filter(

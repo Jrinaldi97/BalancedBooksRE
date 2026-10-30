@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
 
 from app.database import get_db
-from app.routes._helpers import clamp_pagination
+from app.routes._helpers import clamp_pagination, reject_null_updates
 from app.models.purchase_orders import PurchaseOrder, PurchaseOrderLine, POStatus
 from app.models.contacts import Vendor
 from app.schemas.purchase_orders import (
@@ -151,7 +151,10 @@ def update_po(po_id: int, data: POUpdate, db: Session = Depends(get_db)):
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
-    for key, val in data.model_dump(exclude_unset=True, exclude={"lines"}).items():
+    update_data = reject_null_updates(
+        PurchaseOrder, data.model_dump(exclude_unset=True, exclude={"lines"})
+    )
+    for key, val in update_data.items():
         if key == "status":
             setattr(po, key, POStatus(val))
         else:

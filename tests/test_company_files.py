@@ -40,6 +40,10 @@ from app.services import auth as auth_service
 from app.services import storage
 from app.services.audit import register_audit_hooks
 
+# The seeded admin row is never signed in to with a password; a named
+# constant keeps it apart from the username for the secret scanner.
+_NO_PASSWORD = "x"
+
 PNG_ACME = b"\x89PNG\r\n\x1a\n" + b"acme-red-logo"
 PNG_BRAVO = b"\x89PNG\r\n\x1a\n" + b"bravo-blue-logo"
 VIEWER_PW = "viewer-password-1"
@@ -66,13 +70,29 @@ def _sign_in_here(Session) -> None:
     """Opening another company file is signing in to it: a sign-in belongs
     to the company it was made in (app/services/auth.py). The file takes the
     id the client's session was signed in with, so the session stays good
-    here, as it would after signing in."""
+    here, as it would after signing in. The session also names its user and
+    the version it is good for (revocable sessions), re-checked against
+    the users table every request; a real switch stashes the person from the
+    company switched to, so this template file carries the matching admin row
+    (id 1, the client fixture's admin) the same way it carries the id above."""
     from app.services import auth as auth_service
     from app.services.settings_service import set_setting
 
     signed_in_to = auth_service._company_id()
     with Session() as s:
         set_setting(s, "company_session_id", signed_in_to)
+        if s.get(User, 1) is None:
+            s.add(
+                User(
+                    id=1,
+                    username="admin",
+                    display_name="Operator",
+                    password_hash=_NO_PASSWORD,
+                    role="admin",
+                    is_active=True,
+                    session_version=0,
+                )
+            )
         s.commit()
 
 

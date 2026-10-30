@@ -9,6 +9,7 @@ from sqlalchemy import LargeBinary, event, inspect
 from sqlalchemy.orm import Session
 
 from app.models.audit import AuditLog
+from app.services.audit_redaction import REDACTED, is_secret_column, redact_values
 from app.services.request_context import acting_username
 
 
@@ -38,11 +39,15 @@ _SKIP_TABLES = {
     "portal_accesses",  # portal cookie / token claim access log
     "login_attempts",  # admin failed-login tracking
     "document_audits",  # hash-chain document audit
+    "request_keys",  # retry-safe request identities (#292): the payment is the event
     "email_log",  # outbound email send log
 }
 
 # Column values that must never be snapshotted into audit JSON — the users
 # table is audited (who created/changed accounts matters), its hashes are not.
+# The one list, for every action and for settings rows, is
+# app/services/audit_redaction.py (2.24.0 gate, NEW-148: an UPDATE copied the
+# hash before and after, and a settings row carried its secret value).
 _REDACT_COLUMNS = {"password_hash"}
 
 
@@ -85,12 +90,16 @@ def _get_instance_dict(instance):
         key = col.key
         if _is_file_content(col):
             continue
-        if key in _REDACT_COLUMNS:
-            result[key] = "***"
-            continue
         val = getattr(instance, key, None)
+        if (
+            (key in _REDACT_COLUMNS or is_secret_column(key))
+            and isinstance(val, str)
+            and val
+        ):
+            result[key] = REDACTED
+            continue
         result[key] = _serialize_value(val)
-    return result
+    return redact_values(getattr(instance, "__tablename__", ""), result)
 
 
 def log_event(
@@ -108,8 +117,8 @@ def log_event(
         table_name=table_name,
         record_id=record_id,
         action=action,
-        old_values=old_values,
-        new_values=new_values,
+        old_values=redact_values(table_name, old_values),
+        new_values=redact_values(table_name, new_values),
         changed_fields=changed_fields,
         source=source,
         username=_actor(db),
@@ -119,37 +128,43 @@ def log_event(
 
 def audited_bulk_delete(db: Session, query) -> int:
     """Delete the rows a query names, with a DELETE audit event for each —
-    the same event, with the same old_values, that deleting the instance
-    through the session would have written.
+    the event, with the old_values, that deleting the instance through
+    the session writes; returns how many.
 
     The contract for a posted document's line replacement (#289): editing
-    a bill's or an invoice's lines, and re-posting its journal, removes
+    a bill's or an invoice's lines, and re-posting its journal, removed
     the old lines with Query.delete(), which never passes through
     session.deleted, so the after_flush hook saw nothing — the edit's own
     UPDATE and the new lines' INSERTs were in the log, the old lines'
     amounts were not. Every caller that replaces lines goes through here,
     in the same transaction as the replacement, so the log carries each
-    old line (its account and amounts) and each new one."""
+    old line (its account and amounts) and each new one.
+
+    Each row is deleted through the session and flushed here: the hook
+    writes its event, and the identity map lets the row go. The first
+    version logged each row itself and then bulk-deleted with
+    synchronize_session=False, which left the loaded rows in the session;
+    when SQLite reused their ids for the new lines, SQLAlchemy warned
+    "Identity map already had an identity" on every edit (2.23.0 gate,
+    NEW-91)."""
     rows = query.all()
     for row in rows:
-        table = getattr(row, "__tablename__", None)
-        record_id = getattr(row, "id", None)
-        if not table or record_id is None or table in _SKIP_TABLES:
-            continue
-        log_event(
-            db,
-            table,
-            record_id,
-            "DELETE",
-            old_values=_get_instance_dict(row),
-            source="api",
-        )
-    return query.delete(synchronize_session=False)
+        db.delete(row)
+    db.flush()
+    return len(rows)
 
 
 def _after_flush(session, flush_context):
     """SQLAlchemy after_flush event — captures all changes."""
     audit_entries = []
+    # A change made into a closed period with the closing-date password
+    # (#342): the override's own row is written by closing_date, and every
+    # row this request changes after it carries the same source, so the
+    # Closing Date Exceptions report can list what the override touched.
+    source = "api"
+    info = getattr(session, "info", None)
+    if isinstance(info, dict) and info.get("_closing_override_recorded"):
+        source = "closing_date_override"
 
     # New objects (INSERT)
     for obj in session.new:
@@ -168,7 +183,7 @@ def _after_flush(session, flush_context):
                 old_values=None,
                 new_values=new_vals,
                 changed_fields=list(new_vals.keys()),
-                source="api",
+                source=source,
                 username=_actor(session),
             )
         )
@@ -200,6 +215,18 @@ def _after_flush(session, flush_context):
                 old_vals[key] = _serialize_value(old_val)
                 new_vals[key] = _serialize_value(new_val)
                 changed.append(key)
+        # a secret moved is noted as moved, never as what it was
+        old_vals = redact_values(table, old_vals) or old_vals
+        new_vals = redact_values(table, new_vals) or new_vals
+        if table == "settings":
+            # the row's key is what tells a secret setting from the rest
+            key_now = getattr(obj, "key", None)
+            from app.services.audit_redaction import sensitive_setting_keys
+
+            if key_now in sensitive_setting_keys():
+                for vals in (old_vals, new_vals):
+                    if vals.get("value") not in (None, ""):
+                        vals["value"] = REDACTED
 
         if changed:
             audit_entries.append(
@@ -210,7 +237,7 @@ def _after_flush(session, flush_context):
                     old_values=old_vals,
                     new_values=new_vals,
                     changed_fields=changed,
-                    source="api",
+                    source=source,
                     username=_actor(session),
                 )
             )
@@ -232,7 +259,7 @@ def _after_flush(session, flush_context):
                 old_values=old_vals,
                 new_values=None,
                 changed_fields=None,
-                source="api",
+                source=source,
                 username=_actor(session),
             )
         )

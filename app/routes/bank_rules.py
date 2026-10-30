@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.routes._helpers import reject_null_updates
 from app.models.bank_rules import BankRule
 from app.models.banking import BankTransaction
 from app.schemas.bank_rules import BankRuleCreate, BankRuleUpdate, BankRuleResponse
@@ -41,7 +42,9 @@ def update_rule(rule_id: int, data: BankRuleUpdate, db: Session = Depends(get_db
     rule = db.query(BankRule).filter(BankRule.id == rule_id).first()
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
-    for key, val in data.model_dump(exclude_unset=True).items():
+    for key, val in reject_null_updates(
+        BankRule, data.model_dump(exclude_unset=True)
+    ).items():
         setattr(rule, key, val)
     db.commit()
     db.refresh(rule)

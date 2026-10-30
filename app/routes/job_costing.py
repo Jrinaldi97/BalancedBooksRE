@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
+from app.routes._helpers import reject_null_updates
 from app.models.accounts import Account, AccountType
 from app.models.cost_codes import CostCode
 from app.models.job_costing import CostType, Equipment, JobCost, JobCostLine
@@ -93,7 +94,7 @@ def update_cost_type(type_id: int, data: CostTypeUpdate, db: Session = Depends(g
     row = db.get(CostType, type_id)
     if not row:
         raise HTTPException(status_code=404, detail="Cost type not found")
-    changes = data.model_dump(exclude_unset=True)
+    changes = reject_null_updates(CostType, data.model_dump(exclude_unset=True))
     for f in ("default_account_id", "offset_account_id", "burden_offset_account_id"):
         if f in changes:
             _account_or_404(db, changes[f])
@@ -247,7 +248,7 @@ def update_equipment(eq_id: int, data: EquipmentUpdate, db: Session = Depends(ge
     row = db.get(Equipment, eq_id)
     if not row:
         raise HTTPException(status_code=404, detail="Equipment not found")
-    changes = data.model_dump(exclude_unset=True)
+    changes = reject_null_updates(Equipment, data.model_dump(exclude_unset=True))
     if "recovery_account_id" in changes:
         _account_or_404(db, changes["recovery_account_id"])
     for k, v in changes.items():

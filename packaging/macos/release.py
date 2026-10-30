@@ -110,6 +110,41 @@ def _run_signing(*args: str) -> subprocess.CompletedProcess[str]:
     raise AssertionError("unreachable")
 
 
+# hdiutil create fails with "Resource busy" now and then on GitHub's macOS
+# runners right after a large copy (the build job's unsigned DMG, run
+# 40800371868, 2026-10-28; a known runner flake). The candidate DMG here is
+# made the same way, straight after ditto, so it gets a few tries too.
+HDIUTIL_BUSY = "Resource busy"
+HDIUTIL_ATTEMPTS = 5
+HDIUTIL_BACKOFF_SECONDS = (5, 10, 15, 20)
+
+
+def _is_hdiutil_busy(exc: subprocess.CalledProcessError) -> bool:
+    said = f"{getattr(exc, 'stdout', '') or ''}{getattr(exc, 'stderr', '') or ''}"
+    return HDIUTIL_BUSY in said
+
+
+def _run_hdiutil_create(*args: str) -> subprocess.CompletedProcess[str]:
+    """hdiutil create with bounded retries on "Resource busy" only; any
+    other failure raises on the first try, as before."""
+    for attempt in range(1, HDIUTIL_ATTEMPTS + 1):
+        try:
+            return _run("hdiutil", "create", *args)
+        except subprocess.CalledProcessError as exc:
+            if not _is_hdiutil_busy(exc) or attempt == HDIUTIL_ATTEMPTS:
+                raise
+            delay = HDIUTIL_BACKOFF_SECONDS[
+                min(attempt, len(HDIUTIL_BACKOFF_SECONDS)) - 1
+            ]
+            print(
+                f"! hdiutil create: resource busy (attempt {attempt} of "
+                f"{HDIUTIL_ATTEMPTS}); retrying in {delay}s",
+                flush=True,
+            )
+            _sleep(delay)
+    raise AssertionError("unreachable")
+
+
 def _record_run(
     report_path: Path,
     *args: str,
@@ -450,6 +485,47 @@ def _notarize(target: Path, profile: str, report_dir: Path, label: str) -> None:
         raise RuntimeError(f"notarization was not accepted; see {log_path}")
 
 
+# Right after notarization is Accepted, Apple's CDN may not serve the ticket
+# yet. Either `stapler staple` fails with one of these markers, or (the 2.26.0
+# sign jobs: three of four) it exits 0 and `stapler validate` fails a second
+# later. Staple + validate are retried as one unit, ~5 minutes in total; any
+# other staple error also receives the same bounded retry after acceptance.
+STAPLE_TICKET_MISSING = ("Could not find base64 encoded ticket", "Record not found")
+STAPLE_ATTEMPTS = 6
+STAPLE_BACKOFF_SECONDS = (20, 40, 60, 90, 90)
+
+
+def _is_ticket_missing(output: str) -> bool:
+    return any(marker in output for marker in STAPLE_TICKET_MISSING)
+
+
+def _staple_and_validate(target: Path, staple_evidence: Path) -> tuple[bool, str]:
+    """One staple + validate pass: (done, what the stapler said when not).
+
+    Any failure is retried, not only the "no ticket" messages: this runs
+    only after notarytool has seen the submission Accepted, and the v2.27.0
+    tag's sign job failed with a stapler error that matched neither known
+    message, then passed on a rerun (#459). A bundle that is really broken
+    still fails, after the bounded retries, with the stapler's last words.
+    """
+    result = _record_run(
+        staple_evidence, "xcrun", "stapler", "staple", "-v", str(target), check=False
+    )
+    if result.returncode:
+        said = f"{result.stdout or ''}{result.stderr or ''}".strip()
+        kind = (
+            "ticket not available yet" if _is_ticket_missing(said) else "staple failed"
+        )
+        return False, f"{kind} (exit {result.returncode}): {said[-400:]}"
+    validated = _record_run(
+        staple_evidence, "xcrun", "stapler", "validate", "-v", str(target), check=False
+    )
+    if validated.returncode:
+        said = f"{validated.stdout or ''}{validated.stderr or ''}".strip()
+        return False, f"validate failed (exit {validated.returncode}): {said[-400:]}"
+    return True, ""
+
+
 def _staple(target: Path, report_dir: Path) -> None:
     """Attach the notarization ticket to ``target`` and prove it is there.
 
@@ -463,14 +539,22 @@ def _staple(target: Path, report_dir: Path) -> None:
     with `stapler validate`, which only reads the local ticket.
     """
     staple_evidence = report_dir / "stapler.txt"
-    _record_run(staple_evidence, "xcrun", "stapler", "staple", "-v", str(target))
-    validated = _record_run(
-        staple_evidence, "xcrun", "stapler", "validate", "-v", str(target), check=False
-    )
-    if validated.returncode:
-        raise RuntimeError(
-            f"no notarization ticket on {target.name}; see {staple_evidence}"
+    for attempt in range(1, STAPLE_ATTEMPTS + 1):
+        done, said = _staple_and_validate(target, staple_evidence)
+        if done:
+            return
+        if attempt == STAPLE_ATTEMPTS:
+            raise RuntimeError(
+                f"no notarization ticket on {target.name} after {STAPLE_ATTEMPTS} "
+                f"stapling attempts; the last: {said}; see {staple_evidence}"
+            )
+        delay = STAPLE_BACKOFF_SECONDS[min(attempt, len(STAPLE_BACKOFF_SECONDS)) - 1]
+        print(
+            f"! {said.splitlines()[0] if said else 'staple failed'} (attempt "
+            f"{attempt} of {STAPLE_ATTEMPTS}); retrying in {delay}s",
+            flush=True,
         )
+        _sleep(delay)
 
 
 def _verify_dmg_contents_stapled(
@@ -500,13 +584,35 @@ def _verify_dmg_contents_stapled(
             raise RuntimeError(
                 f"{bundle_name} is not inside {dmg.name}; see {evidence}"
             )
-        result = _record_run(
-            evidence, "xcrun", "stapler", "validate", "-v", str(inner), check=False
-        )
-        if result.returncode:
-            raise RuntimeError(
-                f"the app inside {dmg.name} is not stapled; see {evidence}"
+        # `stapler validate` reads the ticket in the bundle and checks it
+        # with Apple's ticket-delivery service, so it fails when that call
+        # fails: on 2026-10-28 four sign jobs in a row died here or at the
+        # staple above with a CloudKit lookup error from the runner, every
+        # staple having exited 0 (#634). The staple's own retry covers the
+        # earlier stapling; this last look gets the same bounded retries.
+        for attempt in range(1, STAPLE_ATTEMPTS + 1):
+            result = _record_run(
+                evidence, "xcrun", "stapler", "validate", "-v", str(inner), check=False
             )
+            if not result.returncode:
+                break
+            said = f"{result.stdout or ''}{result.stderr or ''}".strip()
+            if attempt == STAPLE_ATTEMPTS:
+                raise RuntimeError(
+                    f"the app inside {dmg.name} is not stapled, after "
+                    f"{STAPLE_ATTEMPTS} looks; the last: validate failed (exit "
+                    f"{result.returncode}): {said[-400:]}; see {evidence}"
+                )
+            delay = STAPLE_BACKOFF_SECONDS[
+                min(attempt, len(STAPLE_BACKOFF_SECONDS)) - 1
+            ]
+            print(
+                f"! the app inside {dmg.name}: validate failed (exit "
+                f"{result.returncode}) (look {attempt} of {STAPLE_ATTEMPTS}); "
+                f"retrying in {delay}s",
+                flush=True,
+            )
+            _sleep(delay)
     finally:
         _record_run(evidence, "hdiutil", "detach", str(mount), "-quiet", check=False)
 
@@ -615,9 +721,7 @@ def build_release(
         )
 
         candidate_dmg = report_dir / f"{basename}-candidate.dmg"
-        _run(
-            "hdiutil",
-            "create",
+        _run_hdiutil_create(
             "-volname",
             "SlowBooks Pro",
             "-srcfolder",

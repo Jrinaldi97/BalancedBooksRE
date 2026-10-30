@@ -74,3 +74,26 @@ def test_opening_balance_equity_is_created_once(db_session, seed_accounts):
         and acct.account_type.value == "equity"
         and acct.is_system
     )
+
+
+def test_opening_equity_uses_typed_imported_chart(db_session):
+    from app.models.accounts import Account, AccountType
+    from app.services.safe_errors import DataProblem
+    import pytest
+
+    wrong = Account(
+        name="Other income", account_number="3900", account_type=AccountType.INCOME
+    )
+    imported = Account(
+        name="Opening Bal Equity",
+        account_number="3901",
+        account_type=AccountType.EQUITY,
+    )
+    db_session.add_all([wrong, imported])
+    db_session.flush()
+    assert get_opening_balance_equity_id(db_session) == imported.id
+    imported.name = "Opening Balance Equity"
+    imported.account_type = AccountType.INCOME
+    db_session.flush()
+    with pytest.raises(DataProblem, match="must be an equity"):
+        get_opening_balance_equity_id(db_session)

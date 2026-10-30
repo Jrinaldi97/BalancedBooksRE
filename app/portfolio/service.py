@@ -25,8 +25,8 @@ class Problem(ValueError):
         super().__init__(message)
 
 
-def fail(code, message):
-    raise Problem(code, message)
+def fail(code, message, details=None):
+    raise Problem(code, message, details)
 
 
 def get(db, model, ident):
@@ -887,6 +887,9 @@ def finish_transfer_observation(db, obs, review, event_id, flow, evidence):
 
 
 def match_transfer(db, data, actor):
+    from app.portfolio.transfer_associations import require_no_components
+
+    require_no_components(db, [data.withdrawal_id, data.deposit_id])
     out, out_offset, out_review = transfer_observation(db, data.withdrawal_id)
     inc, inc_offset, inc_review = transfer_observation(db, data.deposit_id)
     if (
@@ -1684,8 +1687,13 @@ def execute(db, command, actor="codex"):
             db.info.pop("portfolio_command_key", None)
             db.info.pop("portfolio_event_ordinal", None)
         if command.operation != "record_operation_verification":
-            for entity in db.query(m.Entity).all():
-                entity.revision += 1
+            # These are optimistic concurrency counters, not financial edits.
+            # One atomic increment retains the exact coarse preview guard while
+            # avoiding an ORM audit row for every entity on every command. The
+            # immutable request receipt remains the operation's audit identity.
+            db.query(m.Entity).update(
+                {m.Entity.revision: m.Entity.revision + 1}, synchronize_session="fetch"
+            )
         result = {
             "committed": True,
             "operation": command.operation,
@@ -1941,8 +1949,8 @@ OPERATIONS["pool_activity"] = pool_activity
 OPERATIONS["correct_posted_pool"] = pool_activity
 
 
-def mortgage_payment(db, data, actor):
-    obs = unposted(db, data.observation_id)
+def mortgage_payment(db, data, actor, correction=None):
+    obs = correction[0] if correction else unposted(db, data.observation_id)
     sc = scope(db, obs.account_id)
     if obs.amount_cents >= 0:
         fail("payment_direction", "A mortgage payment must be a bank withdrawal")
@@ -1957,7 +1965,12 @@ def mortgage_payment(db, data, actor):
         ("escrow", data.escrow_cents, data.escrow_account_id, {"escrow"}),
         ("fee", data.fee_cents, data.fee_account_id, {"expense", "asset", "project"}),
     ]
-    if sum(x[1] for x in components) != -obs.amount_cents:
+    total = sum(x[1] for x in components)
+    if (
+        total <= 0
+        or total > -obs.amount_cents
+        or (not correction and total != -obs.amount_cents)
+    ):
         fail(
             "payment_components",
             "Principal, interest, escrow and fees must equal the bank withdrawal",
@@ -1986,13 +1999,20 @@ def mortgage_payment(db, data, actor):
         flow = "financing" if kind == "principal" else target.cash_flow
         lines.extend(
             [
-                line(ident, amount, property_id=data.property_id, item=data.instrument),
+                line(
+                    ident,
+                    amount,
+                    property_id=data.property_id,
+                    item=data.instrument,
+                    fund_id=getattr(data, "fund_id", None),
+                ),
                 line(
                     obs.account_id,
                     -amount,
                     property_id=data.property_id,
                     item=data.instrument,
                     cash_flow=flow,
+                    fund_id=getattr(data, "fund_id", None),
                 ),
             ]
         )
@@ -2006,24 +2026,32 @@ def mortgage_payment(db, data, actor):
                     amount_cents=-amount,
                 )
             )
-    result = post(
-        db,
-        s.Posting(
-            date=obs.date,
-            description="Mortgage payment " + data.instrument,
-            rationale=data.evidence,
-            kind="debt_payment",
-            source={
-                "observation_id": obs.id,
-                "instrument": data.instrument,
-                "components": {x[0]: x[1] for x in components},
-            },
-            observed=True,
-            journals=[s.Journal(entity_id=sc.entity_id, lines=lines)],
-            management=management,
-        ),
-        actor,
+    posting = s.Posting(
+        date=obs.date,
+        description="Mortgage payment " + data.instrument,
+        rationale=data.evidence,
+        kind="debt_payment",
+        source={
+            "observation_id": obs.id,
+            "instrument": data.instrument,
+            "components": {x[0]: x[1] for x in components},
+            **(
+                {
+                    "lender_evidence": data.lender_evidence.model_dump(),
+                    "application_date": data.application_date.isoformat(),
+                    "application_kind": data.application_kind,
+                }
+                if correction
+                else {}
+            ),
+        },
+        observed=True,
+        journals=[s.Journal(entity_id=sc.entity_id, lines=lines)],
+        management=management,
     )
+    if correction:
+        return post_existing_pool(db, posting, *correction, actor)
+    result = post(db, posting, actor)
     obs.event_id = result["event_id"]
     obs.status = "posted"
     return result
@@ -2969,6 +2997,11 @@ OPERATIONS["correct_posted_settlement"] = settle
 
 
 def correct_posted_internal_transfer(db, data, actor):
+    from app.portfolio.transfer_associations import require_no_components
+
+    require_no_components(
+        db, [data.withdrawal.observation_id, data.deposit.observation_id]
+    )
     """Atomically route two existing, same-day pool legs; never create cash."""
     from app.portfolio.observation_state import observation_state
     from app.portfolio.reports import ledger
@@ -3110,6 +3143,11 @@ OPERATIONS["correct_posted_internal_transfer"] = correct_posted_internal_transfe
 
 
 def correct_posted_intercompany(db, data, actor):
+    from app.portfolio.transfer_associations import require_no_components
+
+    require_no_components(
+        db, [data.withdrawal.observation_id, data.deposit.observation_id]
+    )
     """Correct proven debt purpose without asserting unresolved cash ownership."""
     from app.portfolio.observation_state import observation_state
     from app.portfolio.reports import ledger
@@ -3830,6 +3868,17 @@ def link_classified_transfer(db, data, actor):
         normalized_cash(db, obs, state)
         legs.append((obs, state))
     out, inc = legs[0][0], legs[1][0]
+    from app.portfolio.transfer_associations import association_packets
+
+    if any(
+        row["active"]
+        for rows in association_packets(db, [out.id, inc.id]).values()
+        for row in rows
+    ):
+        fail(
+            "transfer_link",
+            "A source already has component associations; inspect its capacity",
+        )
     if (
         out.id == inc.id
         or out.account_id == inc.account_id
@@ -3869,3 +3918,33 @@ def link_classified_transfer(db, data, actor):
 
 
 OPERATIONS["link_classified_transfer"] = link_classified_transfer
+
+
+def associate_transfer_component(db, data, actor):
+    from app.portfolio.transfer_associations import associate
+
+    return associate(db, data, actor)
+
+
+def reverse_transfer_component(db, data, actor):
+    from app.portfolio.transfer_associations import associate
+
+    return associate(db, data, actor, reverse=True)
+
+
+OPERATIONS["associate_transfer_component"] = associate_transfer_component
+OPERATIONS["reverse_transfer_component"] = reverse_transfer_component
+
+
+from app.portfolio.mortgages import correct_posted_mortgage_payment  # noqa: E402
+
+OPERATIONS["correct_posted_mortgage_payment"] = correct_posted_mortgage_payment
+
+
+def relocate_document(db, data, actor):
+    from app.portfolio.evidence_plans import relocate_document as relocate
+
+    return relocate(db, data, actor)
+
+
+OPERATIONS["relocate_document"] = relocate_document

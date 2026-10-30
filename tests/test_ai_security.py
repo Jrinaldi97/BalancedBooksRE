@@ -16,28 +16,28 @@ from app.services.ai_service import (
 
 
 def test_account_id_accepts_32_lower_hex():
-    assert CLOUDFLARE_ACCOUNT_ID_RE.match("a" * 32)
-    assert CLOUDFLARE_ACCOUNT_ID_RE.match("0123456789abcdef0123456789abcdef")
+    assert CLOUDFLARE_ACCOUNT_ID_RE.fullmatch("a" * 32)
+    assert CLOUDFLARE_ACCOUNT_ID_RE.fullmatch("0123456789abcdef0123456789abcdef")
 
 
 def test_account_id_rejects_uppercase():
-    assert not CLOUDFLARE_ACCOUNT_ID_RE.match("A" * 32)
+    assert not CLOUDFLARE_ACCOUNT_ID_RE.fullmatch("A" * 32)
 
 
 def test_account_id_rejects_short():
-    assert not CLOUDFLARE_ACCOUNT_ID_RE.match("a" * 31)
+    assert not CLOUDFLARE_ACCOUNT_ID_RE.fullmatch("a" * 31)
 
 
 def test_account_id_rejects_long():
-    assert not CLOUDFLARE_ACCOUNT_ID_RE.match("a" * 33)
+    assert not CLOUDFLARE_ACCOUNT_ID_RE.fullmatch("a" * 33)
 
 
 def test_account_id_rejects_non_hex():
-    assert not CLOUDFLARE_ACCOUNT_ID_RE.match("g" * 32)
+    assert not CLOUDFLARE_ACCOUNT_ID_RE.fullmatch("g" * 32)
 
 
 def test_account_id_rejects_empty():
-    assert not CLOUDFLARE_ACCOUNT_ID_RE.match("")
+    assert not CLOUDFLARE_ACCOUNT_ID_RE.fullmatch("")
 
 
 # -------- validate_worker_url() attack vectors --------

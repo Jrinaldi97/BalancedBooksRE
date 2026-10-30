@@ -79,3 +79,14 @@ def install(connection):
     from app.portfolio.card_models import install_card_guards
 
     install_card_guards(connection)
+    if inspect(connection).has_table("re_transfer_associations"):
+        for operation in ("UPDATE", "DELETE"):
+            connection.exec_driver_sql(
+                f"CREATE TRIGGER IF NOT EXISTS re_guard_transfer_associations_{operation} BEFORE {operation} ON re_transfer_associations BEGIN SELECT RAISE(ABORT,'Transfer association history is immutable'); END"
+            )
+        connection.exec_driver_sql(
+            """CREATE TRIGGER IF NOT EXISTS re_guard_transfer_associations_replace
+            BEFORE INSERT ON re_transfer_associations
+            WHEN EXISTS(SELECT 1 FROM re_transfer_associations WHERE id=NEW.id OR supersedes_id=NEW.supersedes_id)
+            BEGIN SELECT RAISE(ABORT,'Transfer association history is immutable'); END"""
+        )

@@ -11,6 +11,7 @@ from app.schemas.common import StrictModel
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
+from app.routes._helpers import reject_null_updates
 from app.models.payroll import Employee
 from app.models.time_entries import TimeEntry, TimeEntryStatus
 from app.schemas.time_entries import (
@@ -123,7 +124,7 @@ def update_time_entry(
             status_code=400,
             detail="Time entry is locked to a pay run and cannot be edited",
         )
-    fields = data.model_dump(exclude_unset=True)
+    fields = reject_null_updates(TimeEntry, data.model_dump(exclude_unset=True))
     if "status" in fields:
         try:
             fields["status"] = TimeEntryStatus(fields["status"])

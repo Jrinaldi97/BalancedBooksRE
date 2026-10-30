@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.contacts import Customer
 from app.schemas.contacts import CustomerCreate, CustomerUpdate, CustomerResponse
-from app.routes._helpers import get_or_404
+from app.routes._helpers import get_or_404, reject_null_updates
 from app.services.contact_balances import ZERO, customer_balances
 from app.services.duplicate_detection import find_duplicates
 
@@ -175,7 +175,8 @@ def update_customer(
     customer_id: int, data: CustomerUpdate, db: Session = Depends(get_db)
 ):
     customer = get_or_404(db, Customer, customer_id)
-    for key, val in data.model_dump(exclude_unset=True).items():
+    update_data = reject_null_updates(Customer, data.model_dump(exclude_unset=True))
+    for key, val in update_data.items():
         setattr(customer, key, val)
     db.commit()
     db.refresh(customer)

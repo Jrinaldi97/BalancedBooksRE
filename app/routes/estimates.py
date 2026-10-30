@@ -1,3 +1,5 @@
+from app.routes._helpers import reject_null_updates
+
 # ============================================================================
 # Estimates — "Convert to Invoice" deep-copies every field and line item,
 # then marks the estimate CONVERTED. PDFs are rendered with WeasyPrint.
@@ -10,6 +12,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from fastapi.responses import Response
+from app.services.audit import audited_bulk_delete
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.database import get_db
@@ -189,7 +192,9 @@ def update_estimate(
     if not estimate:
         raise HTTPException(status_code=404, detail="Estimate not found")
 
-    changes = data.model_dump(exclude_unset=True, exclude={"lines"})
+    changes = reject_null_updates(
+        Estimate, data.model_dump(exclude_unset=True, exclude={"lines"})
+    )
     if changes.get("customer_id") not in (None, estimate.customer_id):
         customer = db.get(Customer, changes["customer_id"])
         if not customer:
@@ -214,7 +219,9 @@ def update_estimate(
         # 2.17.3 exploratory fixes). The customer is the one the estimate
         # has after this edit.
         resolve_line_taxable(db, data.lines, db.get(Customer, estimate.customer_id))
-        db.query(EstimateLine).filter(EstimateLine.estimate_id == estimate_id).delete()
+        audited_bulk_delete(
+            db, db.query(EstimateLine).filter(EstimateLine.estimate_id == estimate_id)
+        )
         for i, line_data in enumerate(data.lines):
             line = EstimateLine(
                 estimate_id=estimate_id,

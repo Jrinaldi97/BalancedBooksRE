@@ -23,6 +23,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -126,6 +127,8 @@ from app.services.auth import get_session_secret
 from app.services.auth import (
     signed_in_before_this_start as _signed_in_before_this_start,
     signed_in_to_another_company as _signed_in_to_another_company,
+    check_session_user as _check_session_user,
+    SESSION_VERSION_KEY as _SESSION_VERSION_KEY,
 )
 
 from app import __version__
@@ -590,22 +593,6 @@ async def _request_validation_handler(request: Request, exc: RequestValidationEr
 
 app.add_exception_handler(RequestValidationError, _request_validation_handler)
 
-# ---- CORS (Phase 9.7: locked down) ----
-# Wildcard origins with credentials is a CSRF amplifier. Default to just
-# localhost; override with ALLOWED_ORIGINS env var (comma-separated) for
-# a custom LAN hostname like http://slowbooks.local:3001.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ALLOW_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# gzip responses larger than 1 KB. Analytics JSON payloads compress ~70%,
-# which is a big win over LAN for /api/analytics/dashboard and friends.
-app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
-
 
 # Content-Security-Policy: defense in depth against XSS even if autoescape
 # misses a sink. 'self' for scripts/styles + 'unsafe-inline' for the inline
@@ -687,7 +674,6 @@ def _set_if_unset(headers, name: str, value: str) -> None:
         headers[name] = value
 
 
-@app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
     # The desktop shell fetches documents from page JS and saves them
@@ -729,14 +715,6 @@ async def security_headers(request: Request, call_next):
             f"max-age={HSTS_MAX_AGE}; includeSubDomains; preload",
         )
     return response
-
-
-# Promote any plain-HTTP request to HTTPS before it touches the app. Added
-# BEFORE other middleware so it runs LAST in the response chain — i.e. the
-# OUTERMOST request gate. Behind a TLS-terminating proxy this is a no-op
-# because the proxy already speaks HTTPS to the app.
-if FORCE_HTTPS:
-    app.add_middleware(HTTPSRedirectMiddleware)
 
 
 # ---- Auth gate (Phase 9.7) ----
@@ -860,7 +838,6 @@ def _role_allows(role: str, method: str, path: str) -> bool:
     return not path.startswith(_ADMIN_WRITE_PREFIXES)
 
 
-@app.middleware("http")
 async def require_session(request: Request, call_next):
     path = request.url.path
     if (
@@ -892,7 +869,31 @@ async def require_session(request: Request, call_next):
                     "company's password to continue."
                 },
             )
-        role = request.session.get("role") or "admin"
+        # Revocable sessions: the signed cookie is no longer trusted
+        # on its own. Re-read the user this session names (one cheap lookup
+        # on this company's DB) and sign the session out when it has been
+        # deactivated, its role or password changed since, or the row is
+        # gone. The role comes from the row too, so a demotion takes effect
+        # on the next request instead of living in the cookie.
+        state, db_role, db_version = _check_session_user(request.session)
+        if state == "revoked":
+            request.session.clear()
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": "Your sign-in has ended. Sign in again to continue."
+                },
+            )
+        if state == "ok":
+            role = db_role
+            # Keep the cookie's own copy honest: routes that gate on
+            # request.session["role"] (user management, company switch) then
+            # see the demotion too, not the stale role the cookie carried.
+            if request.session.get("role") != db_role:
+                request.session["role"] = db_role
+            request.session[_SESSION_VERSION_KEY] = db_version
+        else:  # "skip": a legacy / desktop session that names no user row
+            role = request.session.get("role") or "admin"
     else:
         # Scoped API tokens: non-human principals (agents, integrations)
         # authenticate with `Authorization: Bearer sbp_...` and wear a role
@@ -984,7 +985,9 @@ class ActingUserContextMiddleware:
             _acting_username.reset(token)
 
 
-# ---- Session cookie (Phase 9.7) ----
+# Middleware order, inner to outer: gzip, auth, actor, session, headers, CORS, HTTPS.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+app.add_middleware(BaseHTTPMiddleware, dispatch=require_session)
 app.add_middleware(ActingUserContextMiddleware)
 
 # Added AFTER require_session so SessionMiddleware becomes the outer
@@ -1001,6 +1004,17 @@ app.add_middleware(
     # if the app insists on HTTPS, the session cookie must too.
     https_only=FORCE_HTTPS,
 )
+
+app.add_middleware(BaseHTTPMiddleware, dispatch=security_headers)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+if FORCE_HTTPS:
+    app.add_middleware(HTTPSRedirectMiddleware)
 
 # Phase 9.7: Auth routes MUST be included (they're exempt from the session gate)
 from app.portfolio.routes import router as portfolio_router  # noqa: E402
@@ -1117,8 +1131,42 @@ static_dir = Path(__file__).parent / "static"
 # who could reach the server. Each company now keeps its files in its own
 # database and serves them through signed-in routes; the folder is left on
 # disk (the upgrade copies from it, and other companies may still need it)
-# but nothing reads it over HTTP. Registered before the /static mount, which
-# on a server install covers app/static/uploads too.
+# but nothing reads it over HTTP.
+#
+# The route below answers 404 for the literal /static/uploads/ prefix, but a
+# route only matches that one spelling — StaticFiles resolves the request path
+# itself, so /static//uploads/<file> and /static/css/%2e%2e/uploads/<file>
+# slipped past the route and the mount served the file with 200. The real
+# defence is the mount: resolve the request against the static directory
+# and refuse it if it lands inside <static>/uploads, whatever spelling got it
+# there. The route stays as belt-and-braces for the common path.
+class _UploadsHiddenStaticFiles(StaticFiles):
+    """A /static mount that never serves anything under the uploads folder."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The one folder that must stay unreachable, as its resolved real path
+        # with conservative case folding — casefold so a request for
+        # UPLOADS matches uploads on macOS/Windows; realpath so symlinks and
+        # the parent's real location are accounted for. Computed once; it is
+        # the same folder for the life of the mount even if it does not exist
+        # yet (realpath still normalises a missing path).
+        self._uploads_prefix = os.path.realpath(
+            os.path.join(str(self.directory), "uploads")
+        ).casefold()
+
+    def lookup_path(self, path):
+        full_path, stat_result = super().lookup_path(path)
+        if full_path:
+            resolved = os.path.realpath(full_path).casefold()
+            # the folder itself or anything inside it
+            if resolved == self._uploads_prefix or resolved.startswith(
+                self._uploads_prefix + os.sep
+            ):
+                return "", None
+        return full_path, stat_result
+
+
 @app.api_route(
     "/static/uploads/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False
 )
@@ -1126,7 +1174,9 @@ async def _uploads_folder_is_not_served(rest: str):
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
 
-app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+app.mount(
+    "/static", _UploadsHiddenStaticFiles(directory=str(static_dir)), name="static"
+)
 
 # SPA entry point
 index_path = Path(__file__).parent.parent / "index.html"

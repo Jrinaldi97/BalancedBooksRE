@@ -31,7 +31,9 @@ TEXT_COLUMNS = {
 }
 
 
-def storage_diagnostics(db):
+def storage_diagnostics(db, projection="full"):
+    if projection not in {"full", "compact"}:
+        fail("projection", "Choose compact or full storage diagnostics")
     if db.get_bind().dialect.name != "sqlite":
         fail("unsupported_database", "Storage diagnostics currently require SQLite")
     with db.no_autoflush:
@@ -58,17 +60,25 @@ def storage_diagnostics(db):
                     "payload_bytes": row.payload_bytes,
                     "unused_bytes": row.unused_bytes,
                 }
-                for row in connection.exec_driver_sql(
-                    "SELECT name, count(*) AS pages, sum(pgsize) AS allocated_bytes, "
-                    "sum(payload) AS payload_bytes, sum(unused) AS unused_bytes "
-                    "FROM dbstat GROUP BY name ORDER BY allocated_bytes DESC, name"
+                for row in (
+                    connection.exec_driver_sql(
+                        "SELECT name, count(*) AS pages, sum(pgsize) AS allocated_bytes, "
+                        "sum(payload) AS payload_bytes, sum(unused) AS unused_bytes "
+                        "FROM dbstat GROUP BY name ORDER BY allocated_bytes DESC, name"
+                    )
+                    if projection == "full"
+                    else []
                 )
             ]
         except OperationalError as exc:
             if "no such table: dbstat" not in str(exc):
                 raise
         payloads = []
-        for table in dict.fromkeys([*PAYLOAD_COLUMNS, *TEXT_COLUMNS]):
+        for table in (
+            dict.fromkeys([*PAYLOAD_COLUMNS, *TEXT_COLUMNS])
+            if projection == "full"
+            else []
+        ):
             columns = (*PAYLOAD_COLUMNS.get(table, ()), *TEXT_COLUMNS.get(table, ()))
             if table not in schema:
                 continue
@@ -126,6 +136,9 @@ def storage_diagnostics(db):
                 pass  # Availability is explicit; do not turn it into a zero.
         return {
             "diagnostic_only": True,
+            "projection": projection,
+            "full_result_ref": "/api/portfolio/storage-diagnostics?projection=full",
+            "derived_revision_audit": "New revision-only increments use one atomic update and do not duplicate entity audit snapshots; historical audit rows are retained",
             "database": {
                 **pragmas,
                 "logical_bytes": pragmas["page_count"] * pragmas["page_size"],
@@ -135,7 +148,9 @@ def storage_diagnostics(db):
                 "file_measurement": "Filesystem sizes are sampled separately and can change during concurrent writes",
             },
             "object_footprints": footprints,
-            "dbstat_available": footprints is not None,
+            "dbstat_available": (
+                footprints is not None if projection == "full" else None
+            ),
             "dbstat_scope": "B-tree pages only; excludes freelist, pointer-map and lock pages",
             "payloads": payloads,
             "retention": {

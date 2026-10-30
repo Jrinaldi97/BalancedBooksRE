@@ -1,16 +1,17 @@
 """Strict, discoverable input contracts shared by UI, CLI and AI tools."""
 
+from app.schemas.common import StrictModel
 from datetime import date
 from typing import Literal, Annotated
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
+from pydantic import ConfigDict, Field, StrictInt, model_validator
 
 Id = Annotated[StrictInt, Field(gt=0)]
 Cents = Annotated[StrictInt, Field(ge=0, le=99999999999999)]
 SignedCents = Annotated[StrictInt, Field(ge=-99999999999999, le=99999999999999)]
 
 
-class Input(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class Input(StrictModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 class EntityInput(Input):
@@ -594,6 +595,12 @@ class CorrectionMovementManifest(Input):
 class ValidateExistingCorrectionInput(Input):
     observation: PostedTransferLeg
     corrective_event_id: Id
+    supporting_corrective_event_ids: list[Id] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description="Complete bounded support set, including corrective_event_id as the legacy resolution anchor. Every event must carry effective economic value in this source family.",
+    )
     balances: list[ExpectedCorrectionBalance] = Field(min_length=0, max_length=100)
     offsetting_evidence: BeneficiaryEvidence | None = None
     movement_manifest: CorrectionMovementManifest | None = None
@@ -802,3 +809,43 @@ class LinkClassifiedTransferInput(Input):
 
 
 CONTRACTS["link_classified_transfer"] = LinkClassifiedTransferInput
+
+
+class TransferComponentInput(LinkClassifiedTransferInput):
+    amount_cents: Annotated[StrictInt, Field(gt=0, le=99999999999999)]
+    evidence_kind: Literal["user_confirmed", "bank_itemized"]
+    source_documents: list[BeneficiaryEvidence] = Field(
+        default_factory=list, max_length=20
+    )
+    supersedes_id: Id | None = None
+
+
+class ReverseTransferComponentInput(LinkClassifiedTransferInput):
+    association_id: Id
+
+
+CONTRACTS["associate_transfer_component"] = TransferComponentInput
+CONTRACTS["reverse_transfer_component"] = ReverseTransferComponentInput
+
+
+class PostedDebtPaymentInput(DebtPaymentInput):
+    review_id: Id
+    expected_state_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_debt_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    application_date: date
+    application_kind: Literal["actual_payment_applied"]
+    lender_evidence: BeneficiaryEvidence
+    fund_id: Id | None = None
+
+
+CONTRACTS["correct_posted_mortgage_payment"] = PostedDebtPaymentInput
+
+
+class RelocateDocumentInput(Input):
+    document_id: Id
+    locator: str = Field(min_length=1, max_length=4096)
+    expected_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    evidence: str = Field(min_length=1)
+
+
+CONTRACTS["relocate_document"] = RelocateDocumentInput

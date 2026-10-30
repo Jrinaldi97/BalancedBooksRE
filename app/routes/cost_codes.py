@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
+from app.routes._helpers import reject_null_updates
 from app.models.accounts import Account
 from app.models.bills import BillLine
 from app.models.cost_codes import STANDARD_COST_CODES, CostCode
@@ -150,7 +151,7 @@ def load_standard_cost_codes(db: Session = Depends(get_db)):
 @router.put("/{code_id}", response_model=CostCodeResponse)
 def update_cost_code(code_id: int, data: CostCodeUpdate, db: Session = Depends(get_db)):
     row = _get(db, code_id)
-    changes = data.model_dump(exclude_unset=True)
+    changes = reject_null_updates(CostCode, data.model_dump(exclude_unset=True))
     if "code" in changes:
         _check_code_clash(db, changes["code"], row.id)
     if "cost_type" in changes:

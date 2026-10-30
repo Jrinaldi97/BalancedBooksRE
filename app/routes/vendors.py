@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.contacts import Vendor
 from app.schemas.contacts import VendorCreate, VendorUpdate, VendorResponse
-from app.routes._helpers import get_or_404
+from app.routes._helpers import get_or_404, reject_null_updates
 from app.services.contact_balances import ZERO, vendor_balances
 from app.services.duplicate_detection import find_duplicates
 from app.services.form_1099 import clear_type_unless_1099
@@ -88,7 +88,8 @@ def create_vendor(
 @router.put("/{vendor_id}", response_model=VendorResponse)
 def update_vendor(vendor_id: int, data: VendorUpdate, db: Session = Depends(get_db)):
     vendor = get_or_404(db, Vendor, vendor_id)
-    for key, val in data.model_dump(exclude_unset=True).items():
+    update_data = reject_null_updates(Vendor, data.model_dump(exclude_unset=True))
+    for key, val in update_data.items():
         setattr(vendor, key, val)
     clear_type_unless_1099(vendor)
     db.commit()

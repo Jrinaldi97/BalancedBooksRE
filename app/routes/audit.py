@@ -37,7 +37,14 @@ def list_audit_logs(
         q = q.filter(sqlfunc.date(AuditLog.timestamp) >= start_date)
     if end_date:
         q = q.filter(sqlfunc.date(AuditLog.timestamp) <= end_date)
-    return q.order_by(AuditLog.timestamp.desc()).offset(offset).limit(limit).all()
+    # rows written before 2.24.0 carry hashes and secret settings in their
+    # snapshots: redacted on the way out (NEW-148)
+    from app.services.audit_redaction import redact_row
+
+    return [
+        redact_row(row)
+        for row in q.order_by(AuditLog.timestamp.desc()).offset(offset).limit(limit)
+    ]
 
 
 @router.get("/tables")

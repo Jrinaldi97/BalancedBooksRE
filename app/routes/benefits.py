@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
+from app.routes._helpers import reject_null_updates
 from app.models.benefits import (
     BenefitCode,
     BenefitYTD,
@@ -116,7 +117,7 @@ def get_code(code_id: int, db: Session = Depends(get_db)):
 @router.put("/codes/{code_id}", response_model=BenefitCodeResponse)
 def update_code(code_id: int, data: BenefitCodeUpdate, db: Session = Depends(get_db)):
     code = _get_code(db, code_id)
-    changes = data.model_dump(exclude_unset=True)
+    changes = reject_null_updates(BenefitCode, data.model_dump(exclude_unset=True))
     if "code" in changes and changes["code"]:
         new = changes["code"].strip().upper()
         dup = (
@@ -273,7 +274,9 @@ def update_group(
     group_id: int, data: EmployeeGroupUpdate, db: Session = Depends(get_db)
 ):
     g = _get_group(db, group_id)
-    for k, v in data.model_dump(exclude_unset=True).items():
+    for k, v in reject_null_updates(
+        EmployeeGroup, data.model_dump(exclude_unset=True)
+    ).items():
         setattr(g, k, v)
     db.commit()
     return _group_response(db, _get_group(db, g.id))
@@ -383,7 +386,9 @@ def update_enrollment(
     a = db.query(EmployeeBenefit).filter(EmployeeBenefit.id == enrollment_id).first()
     if not a:
         raise HTTPException(status_code=404, detail="Enrollment not found")
-    for k, v in data.model_dump(exclude_unset=True).items():
+    for k, v in reject_null_updates(
+        EmployeeBenefit, data.model_dump(exclude_unset=True)
+    ).items():
         setattr(a, k, v)
     db.commit()
     db.refresh(a)

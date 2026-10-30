@@ -37,6 +37,8 @@ class CardAlias(Base):
     alias = Column(String(100), nullable=False)
     start = Column(Date, nullable=False)
     end = Column(Date)
+    replaces_alias_id = Column(Integer, ForeignKey("re_card_aliases.id"))
+    replacement_evidence = Column(JSON)
     evidence = Column(Text, nullable=False)
     actor = Column(String(200), nullable=False)
     created_at = Column(DateTime, server_default=func.now())

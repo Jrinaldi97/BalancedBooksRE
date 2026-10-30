@@ -200,7 +200,11 @@ def test_registry_matches_the_numbers_the_code_resolves_by_literal():
             r'account_number\s*==\s*"(\d{4})"', path.read_text(encoding="utf-8")
         ):
             found.add(m.group(1))
-    unregistered = found - set(control_accounts.CONTROL_ACCOUNTS)
+    # Opening equity is optional: its typed 3900 lookup falls back to an
+    # existing name or creates a valid account. Unlike the required resolvers,
+    # renumbering it cannot silently omit a journal. Typed reuse is covered in
+    # test_bank_kind; reserving every imported 3900 would lock non-equity charts.
+    unregistered = found - set(control_accounts.CONTROL_ACCOUNTS) - {"3900"}
     assert not unregistered, (
         "these account numbers are resolved by literal value but are not in "
         f"CONTROL_ACCOUNTS, so they can be renumbered into silence: {sorted(unregistered)}"

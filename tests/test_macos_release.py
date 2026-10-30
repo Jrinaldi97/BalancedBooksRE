@@ -202,6 +202,7 @@ def test_staple_fails_when_validate_fails(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(args, rc, stdout="", stderr="no ticket")
 
     monkeypatch.setattr(release, "_run", fake_run)
+    monkeypatch.setattr(release, "_sleep", lambda seconds: None)
     with pytest.raises(RuntimeError, match="no notarization ticket"):
         release._staple(app, tmp_path)
 
@@ -257,6 +258,53 @@ def test_dmg_contents_check_uses_the_staged_bundle_name(monkeypatch, tmp_path):
     )
     validated = [c for c in calls if c[1:3] == ("stapler", "validate")]
     assert validated and validated[0][-1].endswith("/final-dmg-mount/Renamed.app")
+    assert calls[-1][:2] == ("hdiutil", "detach")
+
+
+def test_dmg_contents_check_retries_validate_like_the_staple(monkeypatch, tmp_path):
+    """#634: on 2026-10-28 `stapler validate` on the app inside the shipped
+    DMG failed with Apple's CloudKit lookup error on four sign jobs whose
+    every `stapler staple` had exited 0; one look, no retry, failed the
+    release. It now gets the staple's bounded retries, and still fails,
+    with the stapler's words, when the ticket really is not there."""
+    validates = [68, 68, 0]
+    calls = []
+    slept = []
+
+    def fake_record_run(report_path, *args, check=True):
+        calls.append(args)
+        if args[:2] == ("hdiutil", "attach"):
+            (Path(args[4]) / "SlowBooks Pro.app").mkdir(parents=True)
+        rc = validates.pop(0) if args[1:3] == ("stapler", "validate") else 0
+        return subprocess.CompletedProcess(
+            args, rc, stdout="", stderr="CloudKit query failed\n" if rc else ""
+        )
+
+    monkeypatch.setattr(release, "_record_run", fake_record_run)
+    monkeypatch.setattr(release, "_sleep", slept.append)
+    dmg = tmp_path / "SlowBooksPro.dmg"
+    dmg.write_bytes(b"dmg")
+    release._verify_dmg_contents_stapled(
+        dmg, tmp_path / "ev.txt", tmp_path, "SlowBooks Pro.app"
+    )
+    assert sum(c[1:3] == ("stapler", "validate") for c in calls) == 3
+    assert slept == [20, 40]
+    assert calls[-1][:2] == ("hdiutil", "detach")
+
+    # a ticket that is really missing still fails, naming the looks
+    validates[:] = [65] * release.STAPLE_ATTEMPTS
+    calls.clear()
+    slept.clear()
+    again = tmp_path / "again"
+    again.mkdir()
+    with pytest.raises(
+        RuntimeError,
+        match="is not stapled, after 6 looks; the last: validate failed \\(exit 65\\)",
+    ):
+        release._verify_dmg_contents_stapled(
+            dmg, tmp_path / "ev.txt", again, "SlowBooks Pro.app"
+        )
+    assert len(slept) == release.STAPLE_ATTEMPTS - 1
     assert calls[-1][:2] == ("hdiutil", "detach")
 
 
@@ -353,3 +401,50 @@ def test_sign_and_dmg_codesign_go_through_the_retry():
     assert "_run_signing(*command)" in body
     dmg = src.split('f"{BUNDLE_ID}.dmg"')[0]
     assert dmg.rstrip().endswith('"--identifier",') and "_run_signing(" in dmg[-400:]
+
+
+def test_hdiutil_create_retries_only_on_resource_busy(monkeypatch):
+    """GitHub's macOS runners fail hdiutil create with "Resource busy" now and
+    then right after a large copy (run 40800371868). The candidate DMG gets
+    a few tries on that error alone; any other failure raises at once."""
+    calls = []
+    slept = []
+    outcomes = ["busy", "busy", "ok"]
+
+    def fake_run(*args, check=True):
+        calls.append(args)
+        if outcomes.pop(0) == "busy":
+            raise subprocess.CalledProcessError(
+                1, args, output="", stderr="hdiutil: create failed - Resource busy\n"
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(release, "_run", fake_run)
+    monkeypatch.setattr(release, "_sleep", slept.append)
+    release._run_hdiutil_create("-volname", "SlowBooks Pro", "-ov", "x.dmg")
+    assert len(calls) == 3 and all(c[:2] == ("hdiutil", "create") for c in calls)
+    assert slept == [5, 10]
+
+    outcomes[:] = ["other"]
+    calls.clear()
+    slept.clear()
+
+    def fake_run_other(*args, check=True):
+        calls.append(args)
+        raise subprocess.CalledProcessError(
+            1, args, output="", stderr="no space left\n"
+        )
+
+    monkeypatch.setattr(release, "_run", fake_run_other)
+    with pytest.raises(subprocess.CalledProcessError):
+        release._run_hdiutil_create("-volname", "SlowBooks Pro", "-ov", "x.dmg")
+    assert len(calls) == 1 and slept == []
+
+    outcomes[:] = ["busy"] * release.HDIUTIL_ATTEMPTS
+    calls.clear()
+    slept.clear()
+    monkeypatch.setattr(release, "_run", fake_run)
+    with pytest.raises(subprocess.CalledProcessError):
+        release._run_hdiutil_create("-volname", "SlowBooks Pro", "-ov", "x.dmg")
+    assert len(calls) == release.HDIUTIL_ATTEMPTS
+    assert len(slept) == release.HDIUTIL_ATTEMPTS - 1

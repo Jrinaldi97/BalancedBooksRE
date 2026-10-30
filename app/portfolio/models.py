@@ -103,7 +103,7 @@ class Event(Base):
     rationale = Column(Text, nullable=False)
     actor = Column(String(200), nullable=False)
     source = Column(JSON, nullable=False, default=dict)
-    corrects_id = Column(Integer, ForeignKey("re_events.id"))
+    corrects_id = Column(Integer, ForeignKey("re_events.id"), index=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
@@ -139,7 +139,7 @@ class BankObservation(Base):
     source_key = Column(String(200), nullable=False)
     fingerprint = Column(String(64), nullable=False, index=True)
     source = Column(JSON, nullable=False)
-    event_id = Column(Integer, ForeignKey("re_events.id"))
+    event_id = Column(Integer, ForeignKey("re_events.id"), index=True)
     status = Column(String(30), nullable=False, default="imported")
 
 
@@ -148,12 +148,12 @@ class ReviewItem(Base):
     id = Column(Integer, primary_key=True)
     code = Column(String(50), nullable=False)
     entity_id = Column(Integer, ForeignKey("re_entities.id"))
-    event_id = Column(Integer, ForeignKey("re_events.id"))
-    observation_id = Column(Integer, ForeignKey("re_bank_observations.id"))
+    event_id = Column(Integer, ForeignKey("re_events.id"), index=True)
+    observation_id = Column(Integer, ForeignKey("re_bank_observations.id"), index=True)
     detail = Column(Text, nullable=False)
     status = Column(String(20), nullable=False, default="open")
     resolution = Column(Text)
-    resolved_event_id = Column(Integer, ForeignKey("re_events.id"))
+    resolved_event_id = Column(Integer, ForeignKey("re_events.id"), index=True)
     created_at = Column(DateTime, server_default=func.now())
 
 
@@ -178,7 +178,7 @@ class DocumentLink(Base):
     __tablename__ = "re_document_links"
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey("re_documents.id"), nullable=False)
-    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False)
+    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False, index=True)
     page = Column(String(100))
     created_at = Column(DateTime, server_default=func.now())
 
@@ -206,7 +206,7 @@ class Proposal(Base):
 class BasisAdjustment(Base):
     __tablename__ = "re_basis_adjustments"
     id = Column(Integer, primary_key=True)
-    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False)
+    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False, index=True)
     entity_id = Column(Integer, ForeignKey("re_entities.id"), nullable=False)
     date = Column(Date, nullable=False, index=True)
     reason = Column(Text, nullable=False)
@@ -216,7 +216,7 @@ class BasisAdjustment(Base):
 class ManagementAllocation(Base):
     __tablename__ = "re_management_allocations"
     id = Column(Integer, primary_key=True)
-    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False)
+    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False, index=True)
     entity_id = Column(Integer, ForeignKey("re_entities.id"), nullable=False)
     property_id = Column(Integer, ForeignKey("re_properties.id"))
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
@@ -230,7 +230,7 @@ class OpenItem(Base):
     code = Column(String(64), unique=True, nullable=False)
     entity_id = Column(Integer, ForeignKey("re_entities.id"), nullable=False)
     property_id = Column(Integer, ForeignKey("re_properties.id"))
-    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False)
+    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False, index=True)
     kind = Column(String(30), nullable=False)
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
     control_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
@@ -242,7 +242,7 @@ class ItemApplication(Base):
     __tablename__ = "re_item_applications"
     id = Column(Integer, primary_key=True)
     item_id = Column(Integer, ForeignKey("re_open_items.id"), nullable=False)
-    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False)
+    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False, index=True)
     amount_cents = Column(Integer, nullable=False)
 
 
@@ -298,7 +298,7 @@ class SchedulePosting(Base):
     id = Column(Integer, primary_key=True)
     schedule_id = Column(Integer, ForeignKey("re_schedules.id"), nullable=False)
     line_key = Column(String(100), nullable=False)
-    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False)
+    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False, index=True)
 
 
 class ReportRun(Base):
@@ -315,7 +315,7 @@ class CashClassification(Base):
     line_id = Column(
         Integer, ForeignKey("transaction_lines.id"), nullable=False, index=True
     )
-    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False)
+    event_id = Column(Integer, ForeignKey("re_events.id"), nullable=False, index=True)
     date = Column(Date, nullable=False)
     cash_flow = Column(String(20), nullable=False)
     reason = Column(Text, nullable=False)
@@ -382,6 +382,27 @@ class LineAllocation(Base):
     components = Column(JSON, nullable=False)
     evidence = Column(Text, nullable=False)
     supersedes_id = Column(Integer, ForeignKey("re_line_allocations.id"))
+
+
+class TransferAssociation(Base):
+    """Immutable component relationship; zero-valued successors reverse a link."""
+
+    __tablename__ = "re_transfer_associations"
+    __table_args__ = (CheckConstraint("amount_cents >= 0"),)
+    id = Column(Integer, primary_key=True)
+    withdrawal_id = Column(
+        Integer, ForeignKey("re_bank_observations.id"), nullable=False, index=True
+    )
+    deposit_id = Column(
+        Integer, ForeignKey("re_bank_observations.id"), nullable=False, index=True
+    )
+    amount_cents = Column(Integer, nullable=False)
+    supersedes_id = Column(
+        Integer, ForeignKey("re_transfer_associations.id"), unique=True
+    )
+    evidence = Column(JSON, nullable=False)
+    actor = Column(String(200), nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
 from app.portfolio.operation_models import (  # noqa: E402,F401

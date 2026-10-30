@@ -267,7 +267,7 @@ def _paid_past(db: Session, key: str, entry: dict, txn) -> dict | None:
     invoice's total to (A/R), when it is below the payments recorded
     against the invoice here. The document import leaves such a change too
     (qbo_documents.paid_past_new_total): the line both give, else None."""
-    from app.models.invoices import Invoice, InvoiceStatus
+    from app.models.invoices import InvoiceStatus
     from app.services.accounting import _q
 
     txn_type, _, qbo_id = key.partition(":")
@@ -276,7 +276,9 @@ def _paid_past(db: Session, key: str, entry: dict, txn) -> dict | None:
     mapping = (
         db.query(QBOMapping).filter_by(entity_type="invoice", qbo_id=qbo_id).first()
     )
-    invoice = db.get(Invoice, mapping.slowbooks_id) if mapping else None
+    from app.services.qbo_documents import current_invoice_for_import
+
+    invoice = current_invoice_for_import(db, mapping.slowbooks_id) if mapping else None
     if (
         invoice is None
         or invoice.transaction_id is not None

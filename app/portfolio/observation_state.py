@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from datetime import date
-from sqlalchemy import or_, exists, select, func
+from sqlalchemy import or_, func, literal_column, true, select, union_all
 from app.portfolio import models as m
 from app.portfolio.allocations import DIMENSIONS
 from app.portfolio.service import get, values, digest
@@ -41,32 +41,44 @@ def observation_states(db, observation_ids, through=None):
     for ident in observation_ids:
         if ident not in observations:
             get(db, m.BankObservation, ident)
+    # Read each explicit JSON reference once for the entire batch. The former
+    # observation/event OR join expanded to observations x all events, including
+    # json_each for every pair. Scalar references and correction edges are indexed.
+    per_observation = defaultdict(set)
+    events = {}
+
+    def add(ident, event):
+        per_observation[ident].add(event.id)
+        events[event.id] = event
+
+    scalar = func.json_extract(m.Event.source, literal_column("'$.observation_id'"))
     linked_ids = func.json_each(m.Event.source, "$.observation_ids").table_valued(
         "value"
     )
-    linked = exists(
-        select(1)
-        .select_from(linked_ids)
-        .where(linked_ids.c.value == m.BankObservation.id)
-    )
-    roots = (
-        db.query(m.BankObservation.id, m.Event)
-        .join(
-            m.Event,
-            or_(
-                m.Event.id == m.BankObservation.event_id,
-                m.Event.source["observation_id"].as_integer() == m.BankObservation.id,
-                linked,
-            ),
-        )
-        .filter(m.BankObservation.id.in_(observation_ids))
-        .all()
-    )
-    per_observation = defaultdict(set)
-    events = {}
-    for ident, event in roots:
-        per_observation[ident].add(event.id)
-        events[event.id] = event
+    roots = union_all(
+        select(
+            m.BankObservation.id.label("observation_id"),
+            m.BankObservation.event_id.label("event_id"),
+        ).where(
+            m.BankObservation.id.in_(observation_ids),
+            m.BankObservation.event_id.is_not(None),
+        ),
+        select(scalar.label("observation_id"), m.Event.id.label("event_id")).where(
+            scalar.in_(observation_ids)
+        ),
+        select(linked_ids.c.value.label("observation_id"), m.Event.id.label("event_id"))
+        .select_from(m.Event)
+        .join(linked_ids, true())
+        .where(
+            func.json_type(m.Event.source, literal_column("'$.observation_ids'"))
+            == "array",
+            linked_ids.c.value.in_(observation_ids),
+        ),
+    ).subquery()
+    for ident, event in db.query(roots.c.observation_id, m.Event).join(
+        m.Event, m.Event.id == roots.c.event_id
+    ):
+        add(ident, event)
     frontier = set(events)
     while frontier:
         source_ids = {
@@ -150,6 +162,9 @@ def observation_states(db, observation_ids, through=None):
         }
         for ident in (value["withdrawal_id"], value["deposit_id"]):
             links[ident].append(value)
+    from app.portfolio.transfer_associations import association_packets
+
+    associations = association_packets(db, observation_ids)
     result = []
     for ident in observation_ids:
         obs = observations[ident]
@@ -172,6 +187,7 @@ def observation_states(db, observation_ids, through=None):
                 ledger_input.project(obs.date, event_ids=active),
                 entities.get(obs.account_id),
                 links[ident],
+                associations[ident],
             )
         )
     return result
@@ -189,6 +205,7 @@ def _assemble_state(
     cash_rows,
     entity_id,
     counterparty_links,
+    transfer_associations,
 ):
     residuals = {}
     cash = defaultdict(int)
@@ -268,6 +285,11 @@ def _assemble_state(
     }
     if counterparty_links:
         state["counterparty_links"] = counterparty_links
+    if transfer_associations:
+        state["transfer_associations"] = transfer_associations
+        state["remaining_unassociated_cents"] = abs(obs.amount_cents) - sum(
+            row["amount_cents"] for row in transfer_associations if row["active"]
+        )
     from app.portfolio.cash_lineage import normalized_cash
     from app.portfolio.service import Problem
 
