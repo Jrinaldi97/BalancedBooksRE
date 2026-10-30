@@ -557,7 +557,14 @@ class PostedPartyBalanceInput(Input):
 CONTRACTS["correct_posted_party_balance"] = PostedPartyBalanceInput
 
 
+class BeneficiaryEvidence(Input):
+    document_id: Id
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    explanation: str = Field(min_length=1)
+
+
 class ExpectedCorrectionBalance(Input):
+    beneficiary_evidence: BeneficiaryEvidence | None = None
     account_id: Id
     entity_id: Id | None = None
     amount_cents: SignedCents
@@ -578,14 +585,17 @@ class CorrectionSourceMovement(Input):
 
 
 class CorrectionMovementManifest(Input):
-    kind: Literal["single_bank", "paired_bank", "card_liability"]
+    kind: Literal[
+        "single_bank", "paired_bank", "card_liability", "bank_return", "card_return"
+    ]
     observations: list[CorrectionSourceMovement] = Field(min_length=1, max_length=2)
 
 
 class ValidateExistingCorrectionInput(Input):
     observation: PostedTransferLeg
     corrective_event_id: Id
-    balances: list[ExpectedCorrectionBalance] = Field(min_length=1, max_length=100)
+    balances: list[ExpectedCorrectionBalance] = Field(min_length=0, max_length=100)
+    offsetting_evidence: BeneficiaryEvidence | None = None
     movement_manifest: CorrectionMovementManifest | None = None
     evidence: str = Field(min_length=1)
 
@@ -755,3 +765,37 @@ class PostedOwnerCustodyPayoutInput(Input):
 CONTRACTS["correct_posted_owner_custody_payout"] = PostedOwnerCustodyPayoutInput
 # Import the module for registration; direct card_schemas imports work as well.
 from app.portfolio import card_schemas as card_schemas  # noqa: E402
+
+
+class ReviewReopenInput(Input):
+    review_id: Id
+    expected_resolution: str | None
+    expected_resolved_event_id: Id | None
+    reason: str = Field(min_length=1)
+    evidence: str = Field(min_length=1)
+    corrective_event_id: Id | None = None
+
+
+CONTRACTS["reopen_review"] = ReviewReopenInput
+
+
+class JointPoolInput(Input):
+    corrections: list[PostedPoolInput] = Field(min_length=2, max_length=100)
+    evidence: str = Field(min_length=1)
+
+
+CONTRACTS["correct_posted_pool_joint"] = JointPoolInput
+
+
+class LinkTransferLeg(Input):
+    observation_id: Id
+    expected_state_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class LinkClassifiedTransferInput(Input):
+    withdrawal: LinkTransferLeg
+    deposit: LinkTransferLeg
+    evidence: str = Field(min_length=1)
+
+
+CONTRACTS["link_classified_transfer"] = LinkClassifiedTransferInput

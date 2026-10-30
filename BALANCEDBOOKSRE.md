@@ -51,3 +51,59 @@ Use Python 3.12 with `requirements.txt`, plus `pywebview` for the Mac window. Ru
 Build the internal-use Mac bundle with PyInstaller and `packaging/macos/BalancedBooksRE.spec`. The local build is ad-hoc signed, not a publicly notarized release. Preserve LICENSE and attribution. Upstream modules remain in source; the portfolio navigation focuses on the new workflows.
 
 Acceptance scenarios live in `tests/test_balancedbooks_portfolio.py`. They test accounting outcomes, immutable journals, idempotency, period locks, duplicate handling, property/custody dimensions, both reporting bases and group adjustments. Existing upstream tests are retained, with assertions updated for the intentional fork name/navigation changes.
+
+
+## October 30 workflow repairs (0.5.0)
+
+Native command schemas describe the exact inputs. All changes use existing
+transaction, idempotency, preview, period, evidence and source-state controls.
+No accounting migration or automatic historical review closure runs on startup.
+
+- `reopen_review` saves the previous resolution in its immutable command receipt,
+  checks the expected resolution, and reopens only the selected item. Accounting
+  and unrelated property resolutions are unchanged. Failed verification does not
+  automatically reopen reviews; reviewers explicitly select the affected items.
+- `validate_existing_correction` can record an explicit beneficiary association
+  for a missing historical party, scoped to the expected economic balance and a
+  registered document hash linked to that correction. It rejects known-party
+  conflicts and fund mismatches. This records a reviewer assertion, not automatic
+  document certification. Return manifests (`bank_return`, `card_return`) permit
+  a genuinely fully offsetting family only with linked source evidence and exact
+  original movements. Zero suspense alone is insufficient.
+- Historical receipt restoration accepts same-event, same-bank, same-fund net-zero
+  reclassifications. Additional economic movements and changed dates still fail.
+- `correct_posted_pool_joint` validates an atomic same-date group of existing pool
+  corrections against final dated holdings, including later allocation boundaries.
+  It requires fresh states, distinct observations and no invented advances. A real
+  residual allocation deficit rejects every leg. Different dates use chronological
+  groups. Each correction retains its source-preservation and custody checks.
+- `link_classified_transfer` records an evidenced counterparty association when a
+  receiving bank observation is already classified. It requires fresh source states
+  and preserves its posting. The association appears in observation state and the
+  saved receipt. It does not change purpose, fund ownership, or property allocation.
+- Card repayments accept an explicit `payer_entity_id`, producing reciprocal
+  Due From/To entries and dated transit on the actual bank and issuer dates.
+  Returns and retries retain their original attempt relationships. Optional
+  `adopt_classified_bank` adopts an existing exact repayment-clearing representation
+  on both bases; incompatible legacy classifications remain guarded and require
+  a supported correction first. Adoption adds no second bank movement.
+- Card purchases support `project` accounts, including intercompany projects with
+  property allocation pending. `classify_card_merchant_credit` classifies supported
+  independent company/entity contra-costs without fabricating a purchase parent.
+  External-party credits still require a separately evidenced obligation workflow.
+- `classify_card_failed_pair` records exact issuer payment/return pairs through
+  clearing, retaining both dates and an unresolved funding relationship. It never
+  labels the pair a successful bank repayment.
+- `verification_export` provides 1–200 observations per page, both-basis suspense,
+  review states and committed receipt/effect references. Continue with the returned
+  book digest; any intervening accounting change invalidates the cursor. It is an
+  application-state export, not an independent evidence audit.
+- Single review resolution now exposes the same review-lifecycle result as batches.
+  Connector plain-text 4xx rejections retain bounded diagnostics. Uncertain writes
+  still recover under the identical key, and preview IDs remain provisional.
+
+External provider access limits, missing statements, missing beneficiary/funding
+proof, expiring attachment links, OCR accuracy and pending host permissions are
+not settled by these software changes. Existing UTF-8/BOM and CP1252 CSV handling,
+multiline parsing, incremental hashes, connection guards and preview identity
+protection remain in place. Immutable SQLite mode is only for closed snapshots.

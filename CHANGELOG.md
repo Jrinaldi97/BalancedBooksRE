@@ -5,6 +5,15 @@ Notable changes between releases. Format roughly follows
 used during development is captured here so the README can stay focused
 on what the software does, not on what sprint shipped what.
 
+## BalancedBooksRE 0.5.0 — October 30, 2026
+
+Add audited review reopening, source-backed historical beneficiary/return
+validation, same-date joint pooled corrections, classified counterparty links,
+cross-entity card repayments and bank-side adoption, project card costs,
+independent merchant credits, failed issuer-payment pairs and paginated audit
+exports. Preserve source observations and existing accounting; no automatic
+historical corrections or closures. See BALANCEDBOOKSRE.md for boundaries.
+
 ## [Unreleased]
 
 ### v2.22.3 — The ledger behind the dashboard

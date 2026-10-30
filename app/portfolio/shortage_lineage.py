@@ -92,7 +92,20 @@ def restoration_receipt(db, assessment, selected):
     # A new positive source under the same observation would be duplicate funding.
     # Cashless classification descendants are supported; gross attribution needs
     # the allocation workflow instead of being treated as another receipt.
-    if any(j.event_id != selected.id for _, j in physical):
+    overlays = {}
+    for line, journal in physical:
+        if journal.event_id == selected.id:
+            continue
+        # Net only within one correction, account, and date. Separate economic
+        # movements cannot cancel each other across events or bank accounts.
+        line_scope = db.get(m.LineScope, line.id)
+        key = (
+            journal.event_id,
+            line.account_id,
+            line_scope.fund_id if line_scope else None,
+        )
+        overlays[key] = overlays.get(key, 0) + cents(line.debit) - cents(line.credit)
+    if any(overlays.values()):
         fail("restoration_lineage", "Receipt ancestry has additional bank movements")
     classification = get(db, m.Event, obs.event_id)
     if classification.id != selected.id:

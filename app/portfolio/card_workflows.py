@@ -126,7 +126,7 @@ def import_card_activity(db, data, actor):
     return {**result, "card_id": card.id, "financial_entries_added": False}
 
 
-def _source(db, ref, role, entity_id, expected_account=None):
+def _source(db, ref, role, entity_id, expected_account=None, *, adopt=False):
     from app.portfolio.observation_state import observation_state
     from app.portfolio.reports import ledger
 
@@ -187,6 +187,20 @@ def _source(db, ref, role, entity_id, expected_account=None):
                     "card_source_lineage",
                     "Source liability or cash must match the exact original observation on both bases",
                 )
+        if adopt:
+            if any(state["suspense_residuals"].values()):
+                svc.fail(
+                    "card_adoption",
+                    "Adoption requires fully classified existing accounting on both bases",
+                )
+            return {
+                "obs": obs,
+                "account": account,
+                "state": state,
+                "residuals": [],
+                "physical": physical,
+                "reviews": [],
+            }
         if (
             residuals != state["suspense_residuals"]["modified_cash_bank_posting"]
             or sum(r["amount_cents"] for r in residuals) != -obs.amount_cents
@@ -215,6 +229,10 @@ def _source(db, ref, role, entity_id, expected_account=None):
         svc.fail(
             "card_source_lineage",
             "Unposted observation unexpectedly has an existing correction family",
+        )
+    if adopt:
+        svc.fail(
+            "card_adoption", "Adoption requires an already-posted bank observation"
         )
     return {
         "obs": obs,
@@ -357,7 +375,7 @@ def _cost_lines(db, card, components, *, refund=False):
             )
         else:
             target = svc.scope(db, component["account_id"], target_entity)
-            if target.role not in {"expense", "cogs", "asset", "prepaid"}:
+            if target.role not in {"expense", "cogs", "asset", "prepaid", "project"}:
                 svc.fail(
                     "card_cost_account",
                     "Choose an ordinary cost or asset account; protected settlement controls need their own workflow",
@@ -403,7 +421,7 @@ def _unique_code(db, code):
         )
 
 
-def classify_card_purchase(db, data, actor):
+def classify_card_purchase(db, data, actor, *, credit=False):
     _unique_code(db, data.code)
     svc = _svc()
     card = _identity(db, data.card_id)
@@ -411,9 +429,10 @@ def classify_card_purchase(db, data, actor):
         db, data.observation, "credit_card", card.entity_id, card.account_id
     )
     obs = source["obs"]
+    sign = -1 if credit else 1
     if (
-        obs.amount_cents >= 0
-        or sum(c.amount_cents for c in data.components) != -obs.amount_cents
+        sign * obs.amount_cents >= 0
+        or sum(c.amount_cents for c in data.components) != -sign * obs.amount_cents
     ):
         svc.fail(
             "card_purchase_amount",
@@ -437,6 +456,11 @@ def classify_card_purchase(db, data, actor):
                     "card_beneficiary", "Use company cost for the card's own company"
                 )
         else:
+            if credit:
+                svc.fail(
+                    "credit_beneficiary",
+                    "Independent credits require a maintained cost account; external obligations need their own evidenced correction",
+                )
             party = svc.get(db, m.Party, part.party_id)
             if party.entity_id:
                 svc.fail(
@@ -447,7 +471,7 @@ def classify_card_purchase(db, data, actor):
         component["item"] = f"card:{data.code}:{part.key}"
         component["date"] = obs.date.isoformat()
         components.append(component)
-    journals, management = _cost_lines(db, card, components)
+    journals, management = _cost_lines(db, card, components, refund=credit)
     journals[card.entity_id] = (
         _source_lines(source, components) + journals[card.entity_id]
     )
@@ -455,9 +479,10 @@ def classify_card_purchase(db, data, actor):
         db,
         s.Posting(
             date=obs.date,
-            description="Card purchase " + data.code,
+            description=("Merchant credit " if credit else "Card purchase ")
+            + data.code,
             rationale=data.evidence,
-            kind="card_purchase",
+            kind="card_merchant_credit" if credit else "card_purchase",
             corrects_id=obs.event_id,
             source={
                 "observation_id": obs.id,
@@ -493,11 +518,11 @@ def classify_card_purchase(db, data, actor):
     activity = m.CardActivity(
         code=data.code,
         card_id=card.id,
-        kind="purchase",
+        kind="merchant_credit" if credit else "purchase",
         observation_id=obs.id,
         event_id=result["event_id"],
         item="card:" + data.code,
-        amount_cents=-obs.amount_cents,
+        amount_cents=abs(obs.amount_cents),
         components=components,
         evidence=data.evidence,
         actor=actor,
@@ -510,7 +535,8 @@ def classify_card_purchase(db, data, actor):
         "resolved_review_ids": closed,
         "source_kind": "card_liability",
         "bank_cash_delta_cents": 0,
-        "cost_cents": activity.amount_cents,
+        "cost_cents": sign * activity.amount_cents,
+        "original_purchase_identified": False if credit else None,
         "original_liability_preserved": bool(source["physical"]),
     }
 
@@ -733,11 +759,77 @@ def _bank_fund(db, source, requested):
             )
 
 
+def _validate_bank_adoption(db, bank, card, payer_id, data, bridge):
+    from app.portfolio.reports import ledger
+
+    svc = _svc()
+    obs = bank["obs"]
+    amount = -obs.amount_cents
+    expected = {}
+
+    def add(entity, account, amount, counterparty=None, fund=None):
+        expected[(entity, account, None, None, fund, counterparty, data.item, None)] = (
+            amount
+        )
+
+    if payer_id == card.entity_id:
+        add(payer_id, bridge, amount, fund=data.bank_fund_id)
+    else:
+        add(
+            payer_id,
+            svc.control(db, payer_id, "due_from"),
+            amount,
+            card.entity_id,
+            data.bank_fund_id,
+        )
+        add(
+            card.entity_id, svc.control(db, card.entity_id, "due_to"), -amount, payer_id
+        )
+        add(card.entity_id, bridge, amount)
+    for basis in ("accrual", "modified_cash_bank_posting"):
+        totals = defaultdict(int)
+        for row in ledger(
+            db, date.max, basis=basis, event_ids=bank["state"]["event_ids"]
+        ):
+            if row["role"] == "bank":
+                if row.get("fund_id") != data.bank_fund_id:
+                    svc.fail(
+                        "card_adoption",
+                        "Existing bank allocation differs from the supplied fund",
+                    )
+                continue
+            if row["date"] != obs.date.isoformat():
+                svc.fail(
+                    "card_adoption",
+                    "Existing repayment accounting has a different date",
+                )
+            key = (
+                row["entity_id"],
+                row["account_id"],
+                row.get("property_id"),
+                row.get("unit_id"),
+                row.get("fund_id"),
+                row.get("counterparty_id"),
+                row.get("item"),
+                row.get("cash_flow"),
+            )
+            totals[key] += row["debit_cents"] - row["credit_cents"]
+        if {k: v for k, v in totals.items() if v} != expected:
+            svc.fail(
+                "card_adoption",
+                "Existing bank accounting must establish the exact dated repayment clearing and reciprocal balances",
+            )
+
+
 def _payment(db, data, actor, returned=False):
     _unique_code(db, data.code)
     svc = _svc()
     card = _identity(db, data.card_id)
-    bank = _source(db, data.bank_observation, "bank", card.entity_id)
+    payer_id = data.payer_entity_id or card.entity_id
+    svc.get(db, m.Entity, payer_id)
+    bank = _source(
+        db, data.bank_observation, "bank", payer_id, adopt=data.adopt_classified_bank
+    )
     issuer = _source(
         db, data.issuer_observation, "credit_card", card.entity_id, card.account_id
     )
@@ -830,18 +922,57 @@ def _payment(db, data, actor, returned=False):
     bridge = svc.control(db, card.entity_id, "bridge")
     results = []
     closed = []
+    if data.adopt_classified_bank:
+        _validate_bank_adoption(db, bank, card, payer_id, data, bridge)
     for source in (bank, issuer):
+        if source is bank and data.adopt_classified_bank:
+            for review in db.query(m.ReviewItem).filter_by(
+                observation_id=bank_obs.id, code="suspense", status="open"
+            ):
+                review.status = "resolved"
+                review.resolution = data.evidence
+                review.resolved_event_id = bank_obs.event_id
+                closed.append(review.id)
+            results.append({"event_id": bank_obs.event_id, "adopted": True})
+            continue
         obs = source["obs"]
         entries = _source_lines(
             source,
             bank_fund_id=data.bank_fund_id if source is bank else None,
             item=data.item,
         )
-        entries.append(
-            svc.line(
-                bridge, -obs.amount_cents, item=data.item, fund_id=data.bank_fund_id
+        cross_entity = payer_id != card.entity_id
+        bridge_fund = None if cross_entity else data.bank_fund_id
+        if cross_entity and source is bank:
+            entries.append(
+                svc.line(
+                    svc.control(db, payer_id, "due_from"),
+                    -obs.amount_cents,
+                    counterparty_id=card.entity_id,
+                    item=data.item,
+                    fund_id=data.bank_fund_id,
+                )
             )
-        )
+            journals = [
+                s.Journal(entity_id=payer_id, lines=entries),
+                s.Journal(
+                    entity_id=card.entity_id,
+                    lines=[
+                        svc.line(bridge, -obs.amount_cents, item=data.item),
+                        svc.line(
+                            svc.control(db, card.entity_id, "due_to"),
+                            obs.amount_cents,
+                            counterparty_id=payer_id,
+                            item=data.item,
+                        ),
+                    ],
+                ),
+            ]
+        else:
+            entries.append(
+                svc.line(bridge, -obs.amount_cents, item=data.item, fund_id=bridge_fund)
+            )
+            journals = [s.Journal(entity_id=card.entity_id, lines=entries)]
         result = svc.post(
             db,
             s.Posting(
@@ -862,7 +993,7 @@ def _payment(db, data, actor, returned=False):
                     "original_payment_id": parent.id if parent else None,
                     "retry_of_return_id": retry.id if retry else None,
                 },
-                journals=[s.Journal(entity_id=card.entity_id, lines=entries)],
+                journals=journals,
             ),
             actor,
         )
@@ -1186,9 +1317,92 @@ def card_state(db, card_id, through=None):
     return result
 
 
+def classify_card_merchant_credit(db, data, actor):
+    return classify_card_purchase(db, data, actor, credit=True)
+
+
+def classify_card_failed_pair(db, data, actor):
+    svc = _svc()
+    card = _identity(db, data.card_id)
+    _unique_code(db, data.code + "-payment")
+    _unique_code(db, data.code + "-return")
+    payment = _source(db, data.payment, "credit_card", card.entity_id, card.account_id)
+    returned = _source(
+        db, data.returned, "credit_card", card.entity_id, card.account_id
+    )
+    a, b = payment["obs"], returned["obs"]
+    if (
+        a.id == b.id
+        or a.amount_cents <= 0
+        or a.amount_cents != -b.amount_cents
+        or b.date < a.date
+    ):
+        svc.fail(
+            "failed_pair",
+            "Identify the original issuer payment and its exact later return",
+        )
+    item = "failed-card:" + data.code
+    bridge = svc.control(db, card.entity_id, "bridge")
+    if svc.balance(db, bridge, date.max, item=item):
+        svc.fail("failed_pair", "Use a new item for this independently evidenced pair")
+    results, closed, parent = [], [], None
+    for source, suffix in ((payment, "payment"), (returned, "return")):
+        obs = source["obs"]
+        entries = _source_lines(source, item=item)
+        entries.append(svc.line(bridge, -obs.amount_cents, item=item))
+        result = svc.post(
+            db,
+            s.Posting(
+                date=obs.date,
+                description="Failed issuer payment " + data.code,
+                rationale=data.evidence,
+                kind="card_failed_pair",
+                observed=True,
+                corrects_id=obs.event_id,
+                source={
+                    "observation_id": obs.id,
+                    "paired_observation_id": b.id if obs.id == a.id else a.id,
+                    "card_id": card.id,
+                    "funding_relationship": "unresolved",
+                },
+                journals=[s.Journal(entity_id=card.entity_id, lines=entries)],
+            ),
+            actor,
+        )
+        closed += _finish(db, source, result, data.evidence)
+        activity = m.CardActivity(
+            code=data.code + "-" + suffix,
+            card_id=card.id,
+            kind="failed_payment" if suffix == "payment" else "failed_return",
+            observation_id=obs.id,
+            event_id=result["event_id"],
+            parent_id=parent,
+            item=item,
+            amount_cents=abs(obs.amount_cents),
+            components=[],
+            evidence=data.evidence,
+            actor=actor,
+        )
+        db.add(activity)
+        db.flush()
+        parent = activity.id
+        results.append(result)
+    if svc.balance(db, bridge, date.max, item=item):
+        svc.fail("failed_pair", "Failed payment and return must clear exactly")
+    return {
+        "event_ids": [r["event_id"] for r in results],
+        "resolved_review_ids": closed,
+        "bank_cash_delta_cents": 0,
+        "successful_repayment": False,
+        "funding_relationship": "unresolved",
+    }
+
+
 CARD_OPERATIONS = {
     name: globals()[name]
     for name in (
+        "classify_card_merchant_credit",
+        "classify_card_failed_pair",
         "register_card_identity",
         "add_card_alias",
         "import_card_activity",

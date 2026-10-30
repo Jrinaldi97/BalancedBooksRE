@@ -432,6 +432,9 @@ def post(db, data, actor, allocation_journals=(), correction_custody_baselines=N
             "custody_mismatch",
             "Maintained beneficiary and holder must have equal custody changes",
         )
+    if allocation_journals and db.info.get("joint_pool_scopes") is not None:
+        for account_id, fund_id in cash_changes:
+            db.info["joint_pool_scopes"].add((account_id, fund_id, data.date))
     account_changes = defaultdict(int)
     for (account_id, _), amount in cash_changes.items():
         account_changes[account_id] += amount
@@ -451,6 +454,9 @@ def post(db, data, actor, allocation_journals=(), correction_custody_baselines=N
             if (
                 balance(db, account_id, data.date, fund_id) + amount < 0
                 and not data.observed
+                and not (
+                    allocation_journals and db.info.get("joint_pool_scopes") is not None
+                )
             ):
                 details = {
                     "kind": (
@@ -598,6 +604,7 @@ def post(db, data, actor, allocation_journals=(), correction_custody_baselines=N
         # alerts remain in history; any new cash-changing event is assessed.
         if (
             amount != 0
+            and db.info.get("joint_pool_scopes") is None
             and balance(db, account_id, data.date, fund_id) < 0
             and scope(db, account_id).role == "bank"
         ):
@@ -1652,6 +1659,13 @@ def execute(db, command, actor="codex"):
             "correct_posted_"
         ) or command.operation in {
             "validate_existing_correction",
+            "reopen_review",
+            "resolve_review",
+            "classify_card_purchase",
+            "classify_card_merchant_credit",
+            "classify_card_failed_pair",
+            "match_card_repayment",
+            "return_card_repayment",
             "resolve_historical_shortage",
             "resolve_loan_funding_source",
             "resolve_outgoing_funding_source",
@@ -1749,6 +1763,10 @@ def build_pool_posting(db, data, obs, existing_state=None):
             "Identify the supported release before classifying restricted money",
         )
     advance = max(0, -amount - held) if amount < 0 else 0
+    if existing_state is not None and db.info.get("joint_pool_scopes") is not None:
+        if data.advance_from_fund_id or data.advance_item:
+            fail("joint_pool_financing", "Joint attribution cannot introduce financing")
+        advance = 0  # Final dated holdings are validated after all joint legs.
     if advance and (
         not data.advance_from_fund_id or not data.advance_item or not party.entity_id
     ):
@@ -3649,3 +3667,172 @@ OPERATIONS["correct_posted_owner_custody_payout"] = correct_posted_owner_custody
 from app.portfolio.card_workflows import CARD_OPERATIONS  # noqa: E402
 
 OPERATIONS.update(CARD_OPERATIONS)
+
+
+def reopen_review(db, data, actor):
+    row = get(db, m.ReviewItem, data.review_id)
+    if row.status != "resolved":
+        fail("review_state", "Only a resolved review can be reopened")
+    if (
+        row.resolution != data.expected_resolution
+        or row.resolved_event_id != data.expected_resolved_event_id
+    ):
+        fail("stale_state", "Review resolution changed; inspect it again")
+    if data.corrective_event_id is not None:
+        correction = get(db, m.Event, data.corrective_event_id)
+        if (
+            not db.query(m.JournalScope)
+            .filter_by(event_id=correction.id, entity_id=row.entity_id)
+            .first()
+        ):
+            fail("wrong_entity", "Correction must belong to the reviewed entity")
+    # The immutable request receipt retains the exact previous resolution even
+    # after a later supported workflow resolves this item again.
+    previous = {
+        "status": row.status,
+        "resolution": row.resolution,
+        "resolved_event_id": row.resolved_event_id,
+    }
+    row.status = "open"
+    row.resolution = None
+    row.resolved_event_id = None
+    return {
+        "review_id": row.id,
+        "status": "open",
+        "previous_resolution": previous,
+        "reason": data.reason,
+        "evidence": data.evidence,
+        "corrective_event_id": data.corrective_event_id,
+        "financial_entries_added": False,
+    }
+
+
+OPERATIONS["reopen_review"] = reopen_review
+
+
+def correct_posted_pool_joint(db, data, actor):
+    from app.portfolio.observation_state import observation_state
+    from app.portfolio.reports import ledger
+
+    if db.info.get("joint_pool_scopes") is not None:
+        fail("joint_pool", "Nested joint corrections are unsupported")
+    ids = [part.observation_id for part in data.corrections]
+    if len(set(ids)) != len(ids):
+        fail("joint_pool", "Each observation may appear only once")
+    dates = {get(db, m.BankObservation, ident).date for ident in ids}
+    if len(dates) != 1:
+        fail(
+            "joint_pool",
+            "Joint correction requires one actual bank date; use chronological groups",
+        )
+    # Validate every submitted state against the same pre-operation snapshot.
+    for part in data.corrections:
+        if (
+            observation_state(db, part.observation_id)["state_digest"]
+            != part.expected_state_digest
+        ):
+            fail("stale_state", "Joint correction contains a stale observation")
+    results = []
+    db.info["joint_pool_scopes"] = set()
+    try:
+        for part in data.corrections:
+            results.append(pool_activity(db, part, actor))
+        db.flush()
+        for account_id, fund_id, start in sorted(
+            db.info["joint_pool_scopes"], key=repr
+        ):
+            # Check every later effective-allocation boundary, not just today's
+            # projection of history. No transient balance is treated as funding.
+            boundaries = {start, date.max}
+            boundaries.update(
+                day
+                for (day,) in db.query(m.LineAllocation.date)
+                .filter(m.LineAllocation.date >= start)
+                .distinct()
+            )
+            for cutoff in sorted(boundaries):
+                daily = defaultdict(int)
+                for row in ledger(db, cutoff, account_id=account_id):
+                    if fund_id is None or row.get("fund_id") == fund_id:
+                        daily[row["date"]] += row["debit_cents"] - row["credit_cents"]
+                running = 0
+                for day, amount in sorted(daily.items()):
+                    running += amount
+                    if day >= start.isoformat() and running < 0:
+                        fail(
+                            "allocation_source_deficit",
+                            "Joint correction leaves unsupported dated holdings; the entire group was rejected",
+                        )
+                if running < 0:
+                    fail(
+                        "allocation_source_deficit",
+                        "Joint correction leaves unsupported holdings",
+                    )
+    finally:
+        db.info.pop("joint_pool_scopes", None)
+    return {
+        "results": results,
+        "event_ids": [r["event_id"] for r in results],
+        "atomic": True,
+        "bank_cash_delta_cents": 0,
+        "evidence": data.evidence,
+    }
+
+
+OPERATIONS["correct_posted_pool_joint"] = correct_posted_pool_joint
+
+
+def link_classified_transfer(db, data, actor):
+    from app.portfolio.observation_state import observation_state
+    from app.portfolio.cash_lineage import normalized_cash
+
+    legs = []
+    for ref in (data.withdrawal, data.deposit):
+        obs = get(db, m.BankObservation, ref.observation_id)
+        state = observation_state(db, obs.id)
+        if state["state_digest"] != ref.expected_state_digest:
+            fail("stale_state", "Refresh both transfer observations")
+        if obs.status != "posted" or scope(db, obs.account_id).role != "bank":
+            fail("transfer_source", "Link existing posted bank observations only")
+        normalized_cash(db, obs, state)
+        legs.append((obs, state))
+    out, inc = legs[0][0], legs[1][0]
+    if (
+        out.id == inc.id
+        or out.account_id == inc.account_id
+        or out.amount_cents >= 0
+        or out.amount_cents != -inc.amount_cents
+        or scope(db, out.account_id).entity_id != scope(db, inc.account_id).entity_id
+    ):
+        fail(
+            "transfer_source",
+            "Identify equal opposite movements in distinct banks of the same company",
+        )
+    if any(legs[1][1]["suspense_residuals"].values()):
+        fail(
+            "transfer_source", "Receiving observation must already be fully classified"
+        )
+    existing = (
+        db.query(m.RequestRecord).filter_by(operation="link_classified_transfer").all()
+    )
+    for receipt in existing:
+        if {out.id, inc.id} & {
+            receipt.result["withdrawal_id"],
+            receipt.result["deposit_id"],
+        }:
+            fail(
+                "transfer_link",
+                "A source already has a saved counterparty link; inspect that receipt",
+            )
+    return {
+        "withdrawal_id": out.id,
+        "deposit_id": inc.id,
+        "evidence": data.evidence,
+        "financial_entries_added": False,
+        "resolved_review_ids": [],
+        "beneficiary_allocation_changed": False,
+        "scope": "Evidence-backed counterparty association; purpose and beneficial allocation remain separate",
+    }
+
+
+OPERATIONS["link_classified_transfer"] = link_classified_transfer

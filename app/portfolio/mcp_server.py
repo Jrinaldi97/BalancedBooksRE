@@ -103,9 +103,25 @@ async def request(method, path, params=None, body=None):
                 raise http.client.HTTPException(
                     "Local application failed during mutation"
                 )
+            raw_response = response.read()
             try:
-                result = json.loads(response.read())
+                result = json.loads(raw_response)
             except (ValueError, UnicodeDecodeError) as exc:
+                if 400 <= response.status < 500:
+                    raise ToolError(
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "status": response.status,
+                                "code": "request_rejected",
+                                "execution_state": "rejected",
+                                "detail": raw_response[:4096].decode(
+                                    "utf-8", errors="replace"
+                                ),
+                                "detail_truncated": len(raw_response) > 4096,
+                            }
+                        )
+                    ) from exc
                 raise http.client.HTTPException(
                     "Invalid local application response"
                 ) from exc
@@ -506,6 +522,17 @@ async def card_state(card_id: int, as_of: str | None = None) -> dict:
     return await request(
         "GET", f"/cards/{card_id}/state", params={"as_of": as_of} if as_of else None
     )
+
+
+@mcp.tool(annotations=READ)
+async def verification_export(
+    after_id: int = 0, limit: int = 100, expected_book_digest: str | None = None
+) -> dict:
+    """Page compact observation reviews/residuals; bind later pages to book_digest."""
+    params = {"after_id": after_id, "limit": limit}
+    if expected_book_digest is not None:
+        params["expected_book_digest"] = expected_book_digest
+    return await request("GET", "/verification-export", params=params)
 
 
 if __name__ == "__main__":

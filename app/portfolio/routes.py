@@ -101,7 +101,7 @@ def context(db: Session = Depends(get_db)):
             "company_file": Path(database).name if database else None,
             "database_engine": db.get_bind().dialect.name,
             "upstream_base_version": __version__,
-            "portfolio_release": "2026.10-evidence-workflows.3",
+            "portfolio_release": "2026.10-evidence-workflows.4",
             "schema_revisions": versions,
             "command_schema_digest": svc.digest(commands()),
             "company_session_id": runtime.company_session_id(db),
@@ -870,5 +870,20 @@ def card_state(card_id: int, as_of: date | None = None, db: Session = Depends(ge
 
     try:
         return read_state(db, card_id, as_of)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/verification-export")
+def verification_export(
+    after_id: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=200),
+    expected_book_digest: str | None = None,
+    db: Session = Depends(get_db),
+):
+    from app.portfolio.verification_export import verification_export as export
+
+    try:
+        return export(db, after_id, limit, expected_book_digest)
     except svc.Problem as exc:
         raise error(exc) from exc

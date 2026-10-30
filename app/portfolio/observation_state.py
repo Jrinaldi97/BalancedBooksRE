@@ -127,6 +127,29 @@ def observation_states(db, observation_ids, through=None):
             )
         )
     }
+    links = defaultdict(list)
+    for receipt in (
+        db.query(m.RequestRecord)
+        .filter(
+            m.RequestRecord.operation == "link_classified_transfer",
+            or_(
+                m.RequestRecord.result["withdrawal_id"]
+                .as_integer()
+                .in_(observation_ids),
+                m.RequestRecord.result["deposit_id"].as_integer().in_(observation_ids),
+            ),
+        )
+        .order_by(m.RequestRecord.key)
+    ):
+        value = {
+            "request_key": receipt.key,
+            **{
+                key: receipt.result[key]
+                for key in ("withdrawal_id", "deposit_id", "evidence")
+            },
+        }
+        for ident in (value["withdrawal_id"], value["deposit_id"]):
+            links[ident].append(value)
     result = []
     for ident in observation_ids:
         obs = observations[ident]
@@ -148,6 +171,7 @@ def observation_states(db, observation_ids, through=None):
                 ],
                 ledger_input.project(obs.date, event_ids=active),
                 entities.get(obs.account_id),
+                links[ident],
             )
         )
     return result
@@ -164,6 +188,7 @@ def _assemble_state(
     source_observations,
     cash_rows,
     entity_id,
+    counterparty_links,
 ):
     residuals = {}
     cash = defaultdict(int)
@@ -241,6 +266,8 @@ def _assemble_state(
         "reviews": reviews,
         "scope": "Explicit observation references and correction descendants; unrelated journals are not inferred.",
     }
+    if counterparty_links:
+        state["counterparty_links"] = counterparty_links
     from app.portfolio.cash_lineage import normalized_cash
     from app.portfolio.service import Problem
 

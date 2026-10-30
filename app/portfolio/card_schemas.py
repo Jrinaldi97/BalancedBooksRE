@@ -92,6 +92,8 @@ class CardRefundInput(Input):
 
 
 class CardPaymentInput(Input):
+    payer_entity_id: Id | None = None
+    adopt_classified_bank: bool = False
     code: str = Field(min_length=1, max_length=64)
     card_id: Id
     bank_observation: CardObservation
@@ -120,7 +122,17 @@ class CardCoverageInput(Input):
     evidence: str = Field(min_length=1)
 
 
+class CardFailedPairInput(Input):
+    code: str = Field(min_length=1, max_length=32)
+    card_id: Id
+    payment: CardObservation
+    returned: CardObservation
+    evidence: str = Field(min_length=1)
+
+
 CARD_CONTRACTS = {
+    "classify_card_merchant_credit": CardPurchaseInput,
+    "classify_card_failed_pair": CardFailedPairInput,
     "register_card_identity": CardIdentityInput,
     "add_card_alias": CardAliasInput,
     "import_card_activity": CardImportInput,

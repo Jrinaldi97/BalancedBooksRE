@@ -76,17 +76,28 @@ def _movements(db, obs, state, manifest, rows_by_basis):
     else:
         declared = [row.model_dump(mode="json") for row in manifest.observations]
         kind = manifest.kind
+    if kind in {"bank_return", "card_return"}:
+        if (
+            len(declared) != 2
+            or declared[0]["account_id"] != declared[1]["account_id"]
+            or declared[0]["amount_cents"] != -declared[1]["amount_cents"]
+            or declared[1]["date"] < declared[0]["date"]
+        ):
+            fail(
+                "return_manifest",
+                "Declare the original movement and its exact later opposite return on the same account",
+            )
     ids = [row["observation_id"] for row in declared]
     if len(set(ids)) != len(ids) or obs.id not in ids:
         fail(
             "movement_manifest",
             "Declare each observation once, including the reviewed observation",
         )
-    if len(ids) != (2 if kind == "paired_bank" else 1):
+    if len(ids) != (2 if kind in {"paired_bank", "bank_return", "card_return"} else 1):
         fail(
             "movement_manifest", "Movement family has the wrong number of observations"
         )
-    role = "credit_card" if kind == "card_liability" else "bank"
+    role = "credit_card" if kind in {"card_liability", "card_return"} else "bank"
     expected = defaultdict(int)
     original_events = set()
     for declaration in declared:
@@ -200,6 +211,25 @@ def validate_existing(db, data, actor):
             "correction_lineage",
             "An original movement cannot be its family's corrective event",
         )
+    if not data.balances:
+        proof = data.offsetting_evidence
+        if manifest["kind"] not in {"bank_return", "card_return"} or proof is None:
+            fail(
+                "expected_balance",
+                "A fully offsetting family requires an explicit return manifest and source evidence",
+            )
+        if (
+            not db.query(m.DocumentLocation)
+            .filter_by(document_id=proof.document_id, sha256=proof.sha256)
+            .first()
+            or not db.query(m.DocumentLink)
+            .filter_by(document_id=proof.document_id, event_id=correction.id)
+            .first()
+        ):
+            fail(
+                "return_evidence",
+                "Register and link the exact return evidence to this correction",
+            )
     beneficiary, decoder = _beneficiary(correction, obs)
     if beneficiary is not None:
         get(db, m.Party, beneficiary)
@@ -269,10 +299,40 @@ def validate_existing(db, data, actor):
                 ):
                     fail("wrong_beneficiary", "Fund and specified beneficiary disagree")
             elif beneficiary != expected.party_id:
-                fail(
-                    "missing_beneficiary",
-                    "Correction has no typed association to this party; retain the review",
-                )
+                if beneficiary is not None:
+                    fail(
+                        "wrong_beneficiary",
+                        "Recorded and supplied beneficiaries conflict",
+                    )
+                proof = expected.beneficiary_evidence
+                if proof is None:
+                    fail(
+                        "missing_beneficiary",
+                        "Provide a registered source version for this exact obligation scope",
+                    )
+                get(db, m.Document, proof.document_id)
+                if (
+                    not db.query(m.DocumentLocation)
+                    .filter_by(document_id=proof.document_id, sha256=proof.sha256)
+                    .first()
+                ):
+                    fail(
+                        "beneficiary_evidence",
+                        "Register the exact supporting document hash first",
+                    )
+                if (
+                    not db.query(m.DocumentLink)
+                    .filter_by(document_id=proof.document_id, event_id=correction.id)
+                    .first()
+                ):
+                    fail(
+                        "beneficiary_evidence",
+                        "Link the supporting document to this correction first",
+                    )
+                # This explicit reviewer association is retained in the resolution
+                # and immutable receipt; historical source JSON is never rewritten.
+                # It cannot override a typed party or a fund beneficiary.
+
             if decoder and (
                 expected.party_id != beneficiary
                 or expected.item != correction.source["item"]
@@ -359,6 +419,11 @@ def validate_existing(db, data, actor):
             "balances": [row.model_dump() for row in data.balances],
             "movement_manifest": manifest,
             "beneficiary_decoder": decoder,
+            "offsetting_evidence": (
+                data.offsetting_evidence.model_dump()
+                if data.offsetting_evidence
+                else None
+            ),
             "expected_dimensions": list(dimensions),
         },
         sort_keys=True,

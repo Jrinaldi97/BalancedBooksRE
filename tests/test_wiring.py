@@ -266,6 +266,7 @@ _INTENTIONAL_BACKEND_ONLY: set[tuple[str, str]] = {
     # Machine interface called by app/portfolio/mcp_server.py, outside the SPA.
     ("GET", "/api/portfolio/observations/{ident}/state"),
     ("GET", "/api/portfolio/observation-states"),
+    ("GET", "/api/portfolio/verification-export"),
     ("GET", "/api/portfolio/proposals/{ident}"),
     ("GET", "/api/portfolio/requests"),
     # These have native MCP callers, verified by test_portfolio_mcp_filters.
