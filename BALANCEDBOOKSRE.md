@@ -137,3 +137,25 @@ checks while avoiding redundant revision-counter audit rows.
 
 See [0.6.0 engineering notes](docs/bbre-0.6.0-engineering.md) for exact operation
 boundaries, the selective SlowBooks Pro 2.31.1 comparison, migration and validation.
+
+## Bank Payment Rail (0.7.0)
+
+Bank activity has an editable **Payment Rail** column with these ordered choices:
+Cash, Check, Internal-Bank, ACH, Wire, Zelle, Debit Card, FedNow, RTP, Other/Unknown.
+The context endpoint includes each option's scope. Credit cards and other nonbank
+accounts have no rail value. The same bank-only rule is enforced during imports
+and metadata edits, with SQLite integrity triggers as an additional barrier.
+
+Migration bb0007 initializes existing bank observations to Other/Unknown without
+inferring a rail from a description or accounting category. New bank imports also
+default to Other/Unknown. Import preview accepts an optional `payment_rail` column
+mapping using exact option labels; the standard import command accepts the field
+on individual rows. Reimports preserve existing metadata and reject conflicting
+explicit rails instead of overwriting reviewed values.
+
+`set_payment_rail` requires `observation_id`, `payment_rail`,
+`expected_payment_rail`, and `evidence`. It uses the existing atomic command,
+preview, retry and immutable receipt workflows, recording previous/current rail,
+actor and evidence. Rail metadata can be corrected for posted activity, inactive
+accounts and closed periods; it creates no accounting entries and closes no
+reviews. Full and compact observation state and record reads expose the field.

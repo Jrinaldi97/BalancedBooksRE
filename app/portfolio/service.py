@@ -625,6 +625,8 @@ def import_bank(db, data, actor):
     sc = scope(db, data.account_id)
     if sc.role not in ("bank", "credit_card"):
         fail("not_bank", "Imports require a bank or credit card account")
+    if sc.role != "bank" and any(row.payment_rail is not None for row in data.rows):
+        fail("not_bank", "Payment Rail applies only to bank accounts")
     added = []
     duplicates = []
     occurrences = defaultdict(int)
@@ -671,6 +673,11 @@ def import_bank(db, data, actor):
                     "conflicting_source",
                     f"Bank identity {key} has conflicting contents",
                 )
+            if row.payment_rail is not None and row.payment_rail != old.payment_rail:
+                fail(
+                    "conflicting_payment_rail",
+                    "Use set_payment_rail to change an existing bank transaction",
+                )
             duplicates.append(old.id)
             continue
         possible = (
@@ -687,6 +694,9 @@ def import_bank(db, data, actor):
             amount_cents=row.amount_cents,
             description=row.description,
             reference=row.reference,
+            payment_rail=(
+                (row.payment_rail or "Other/Unknown") if sc.role == "bank" else None
+            ),
             source_key=key,
             fingerprint=fingerprint,
             source={
@@ -2649,7 +2659,10 @@ def record_policy(db, data, actor):
     return {"policy_id": row.id}
 
 
+from app.portfolio.payment_rails import set_payment_rail
+
 OPERATIONS.update(
+    set_payment_rail=set_payment_rail,
     create_reporting_group=create_reporting_group,
     group_adjustment=group_adjustment,
     record_policy=record_policy,

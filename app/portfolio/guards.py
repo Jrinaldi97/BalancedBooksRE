@@ -79,6 +79,11 @@ def install(connection):
     from app.portfolio.card_models import install_card_guards
 
     install_card_guards(connection)
+    from app.portfolio.payment_rails import (
+        install_guards as install_payment_rail_guards,
+    )
+
+    install_payment_rail_guards(connection)
     if inspect(connection).has_table("re_transfer_associations"):
         for operation in ("UPDATE", "DELETE"):
             connection.exec_driver_sql(

@@ -136,6 +136,7 @@ class BankObservation(Base):
     amount_cents = Column(Integer, nullable=False)
     description = Column(Text, nullable=False)
     reference = Column(String(200))
+    payment_rail = Column(String(30), nullable=True)
     source_key = Column(String(200), nullable=False)
     fingerprint = Column(String(64), nullable=False, index=True)
     source = Column(JSON, nullable=False)
