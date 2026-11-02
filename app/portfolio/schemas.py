@@ -149,6 +149,16 @@ class Posting(Input):
     release_reason: str | None = None
 
 
+from app.portfolio.payment_rails import PaymentRail
+
+
+class PaymentRailInput(Input):
+    observation_id: Id
+    payment_rail: PaymentRail
+    expected_payment_rail: PaymentRail
+    evidence: str = Field(min_length=1)
+
+
 class BankRow(Input):
     physical_row: Id | None = None
     source_sheet: str | None = None
@@ -157,6 +167,7 @@ class BankRow(Input):
     description: str = ""
     reference: str = ""
     external_id: str | None = None
+    payment_rail: PaymentRail | None = None
 
 
 class ImportInput(Input):
@@ -475,6 +486,7 @@ CONTRACTS.update(
     create_reporting_group=GroupInput,
     group_adjustment=GroupAdjustmentInput,
     record_policy=PolicyInput,
+    set_payment_rail=PaymentRailInput,
 )
 
 

@@ -133,7 +133,7 @@ def _prepare_locked(data_dir, filename):
         FORCE_HTTPS="false",
         APP_HOST="127.0.0.1",
         SLOWBOOKS_DESKTOP="1",
-        APP_VERSION="0.6.0",
+        APP_VERSION="0.7.0",
     )
     from dotenv import load_dotenv
 

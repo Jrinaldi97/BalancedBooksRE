@@ -30,6 +30,7 @@ def parse_bank(content, filename, mapping, date_format="%Y-%m-%d", sheet=None):
             "description",
             "reference",
             "external_id",
+            "payment_rail",
         }
         or not isinstance(column, str)
         or not column
@@ -199,8 +200,18 @@ def parse_bank(content, filename, mapping, date_format="%Y-%m-%d", sheet=None):
             if mapping.get("amount")
             else money(cell("credit")) - money(cell("debit"))
         )
+        rail = str(cell("payment_rail") or "").strip() or None
+        if rail is not None:
+            from app.portfolio.payment_rails import PAYMENT_RAILS
+
+            if rail not in PAYMENT_RAILS:
+                fail(
+                    "invalid_payment_rail",
+                    f"Row {number}: use an exact Payment Rail option",
+                )
         result.append(
             {
+                **({"payment_rail": rail} if rail is not None else {}),
                 "physical_row": number,
                 "source_sheet": source_sheet,
                 "date": day.isoformat(),
