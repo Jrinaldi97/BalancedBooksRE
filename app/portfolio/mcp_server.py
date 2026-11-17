@@ -591,6 +591,104 @@ async def invoice_state(code: str) -> dict:
 
 
 @mcp.tool(annotations=READ)
+async def receipt_candidates(
+    account_id: int,
+    start: str,
+    end: str,
+    amount_cents: int,
+    provider_id: str | None = None,
+    order_id: str | None = None,
+    alias: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """Compare receipt facts with issuer observations, showing confirmed identifiers, conflicts and open questions."""
+    return await request(
+        "GET",
+        "/receipt-candidates",
+        params={k: v for k, v in locals().items() if v is not None},
+    )
+
+
+@mcp.tool(annotations=READ)
+async def movement_check(
+    account_id: int,
+    start: str,
+    end: str,
+    offset: int = 0,
+    limit: int = 100,
+    expected_book_digest: str | None = None,
+) -> dict:
+    """Tie bank or issuer observations to identified ledger movements by date. Page differences including unassigned journals."""
+    return await request(
+        "GET",
+        "/movement-check",
+        params={k: v for k, v in locals().items() if v is not None},
+    )
+
+
+@mcp.tool(annotations=READ)
+async def transaction_register(
+    codes: list[str] | None = None,
+    status: str = "open",
+    after_id: int = 0,
+    limit: int = 50,
+    expected_book_digest: str | None = None,
+) -> dict:
+    """Count flags, distinct observations and overlap. Page one row per bank or card transaction."""
+    return await request(
+        "GET",
+        "/transaction-register",
+        params={k: v for k, v in locals().items() if v is not None},
+    )
+
+
+@mcp.tool(annotations=READ)
+async def transaction_family(
+    observation_id: int,
+    offset: int = 0,
+    limit: int = 40,
+    expected_book_digest: str | None = None,
+) -> dict:
+    """Page original movements, effective journals, both bases, document versions and workpaper history."""
+    return await request(
+        "GET",
+        f"/transaction-family/{observation_id}",
+        params={
+            k: v for k, v in locals().items() if k != "observation_id" and v is not None
+        },
+    )
+
+
+@mcp.tool(annotations=READ)
+async def identity_mappings(
+    account_id: int | None = None,
+    property_id: int | None = None,
+    alias: str | None = None,
+    as_of: str | None = None,
+) -> dict:
+    """Find effective legal-owner, operating-use, replacement-account or parent-site mappings."""
+    return await request(
+        "GET",
+        "/identity-mappings",
+        params={k: v for k, v in locals().items() if v is not None},
+    )
+
+
+@mcp.tool()
+async def export_review_workbook(
+    codes: list[str] | None = None,
+    status: str = "open",
+    expected_book_digest: str | None = None,
+) -> dict:
+    """Save a complete single-sheet workbook in the local BBRE Exports folder and return its path."""
+    return await request(
+        "POST",
+        "/review-workbook",
+        params={k: v for k, v in locals().items() if v is not None},
+    )
+
+
+@mcp.tool(annotations=READ)
 async def review_register(
     after_id: int = 0,
     limit: int = 100,

@@ -4,6 +4,8 @@ Call execute inside a transaction. HTTP/CLI boundaries commit once, never helper
 Untrusted descriptions/evidence are stored as data, never executed as instructions.
 """
 
+from app.portfolio.payment_rails import set_payment_rail
+
 import hashlib
 import json
 import uuid
@@ -415,9 +417,21 @@ def post(db, data, actor, allocation_journals=(), correction_custody_baselines=N
             if sc.role in ("bank", "bridge"):
                 cash_changes[(ln.account_id, ln.fund_id)] += amount
     if any(reciprocal.values()):
-        fail(
+        raise Problem(
             "reciprocal_mismatch",
             "Intercompany entries must update both entities for the same item",
+            {
+                "unmatched": [
+                    {
+                        "lender_entity_id": a,
+                        "borrower_entity_id": b,
+                        "item": item,
+                        "net_cents": v,
+                    }
+                    for (a, b, item), v in reciprocal.items()
+                    if v
+                ]
+            },
         )
     if any(
         amount and (correction_custody_baselines or {}).get(fund) != -amount
@@ -447,9 +461,16 @@ def post(db, data, actor, allocation_journals=(), correction_custody_baselines=N
                 and not data.release_reason
                 and not data.observed
             ):
-                fail(
+                raise Problem(
                     "restricted_funds",
-                    "Restricted funds require an explicit supported release",
+                    "Supply the source-backed release reason for this restricted withdrawal",
+                    {
+                        "fund_id": fund_id,
+                        "account_id": account_id,
+                        "amount_cents": amount,
+                        "restriction": fund.restriction,
+                        "required_field": "release_reason",
+                    },
                 )
             if (
                 balance(db, account_id, data.date, fund_id) + amount < 0
@@ -1673,6 +1694,7 @@ def execute(db, command, actor="codex"):
         ) or command.operation in {
             "validate_existing_correction",
             "reopen_review",
+            "retype_review",
             "resolve_review",
             "classify_card_purchase",
             "classify_card_merchant_credit",
@@ -2480,7 +2502,12 @@ def resolve_review(db, data, actor):
     row = get(db, m.ReviewItem, data.review_id)
     if row.status != "open":
         fail("review_state", "This review item is already resolved")
-    if row.code in ("suspense", "possible_duplicate"):
+    if row.code in (
+        "suspense",
+        "possible_duplicate",
+        "software_limitation",
+        "evidence_gap",
+    ):
         fail(
             "specific_resolution",
             "Use the accounting correction or duplicate-resolution workflow; shortages must be restored and reconciled before resolution",
@@ -2659,8 +2686,6 @@ def record_policy(db, data, actor):
     return {"policy_id": row.id}
 
 
-from app.portfolio.payment_rails import set_payment_rail
-
 OPERATIONS.update(
     set_payment_rail=set_payment_rail,
     create_reporting_group=create_reporting_group,
@@ -2734,7 +2759,11 @@ def post_existing_pool(db, posting, obs, review, state, actor):
     # Consume only cash with the unresolved scope. Previously classified cash
     # stays in the whole-line replacement unchanged, including its cash-flow tag.
     retained = []
-    scope_keys = tuple(k for k in DIMENSIONS if k != "cash_flow")
+    scope_keys = (
+        DIMENSIONS
+        if posting.kind == "component_classification"
+        else tuple(k for k in DIMENSIONS if k != "cash_flow")
+    )
     for row in cash:
         amount = row["debit_cents"] - row["credit_cents"]
 
@@ -2788,7 +2817,11 @@ def post_existing_pool(db, posting, obs, review, state, actor):
         update={
             "journals": journals,
             "observed": False,
-            "kind": "posted_pool_correction",
+            "kind": (
+                "posted_component_correction"
+                if posting.kind == "component_classification"
+                else "posted_pool_correction"
+            ),
             "corrects_id": obs.event_id,
         }
     )
@@ -3961,3 +3994,7 @@ def relocate_document(db, data, actor):
 
 
 OPERATIONS["relocate_document"] = relocate_document
+
+from app.portfolio.review_workspace import RESEARCH_OPERATIONS  # noqa: E402
+
+OPERATIONS.update(RESEARCH_OPERATIONS)

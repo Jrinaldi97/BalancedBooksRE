@@ -3,8 +3,9 @@
 # PostgreSQL in server mode, per-company SQLite files in desktop mode.
 # ============================================================================
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 from starlette.requests import HTTPConnection
 
 from app.config import DATABASE_URL
@@ -15,7 +16,7 @@ from app.config import DATABASE_URL
 #   pool_recycle=1800   recycle every 30 min to avoid stale TCP idle kills
 #   pool_pre_ping=True  cheap SELECT 1 before each checkout; catches dead conns
 #   pool_use_lifo=True  reuse hottest conn first -> better CPU cache locality
-# SQLite URLs skip pool_size/max_overflow since SQLite uses a different strategy.
+# File-backed SQLite uses a connection for each worker. In-memory SQLite keeps its pool class.
 _is_sqlite = DATABASE_URL.startswith("sqlite")
 _engine_kwargs = dict(pool_pre_ping=True)
 if not _is_sqlite:
@@ -25,6 +26,11 @@ if not _is_sqlite:
         pool_recycle=1800,
         pool_use_lifo=True,
     )
+elif (
+    make_url(DATABASE_URL).database not in (None, "", ":memory:", "file::memory:")
+    and make_url(DATABASE_URL).query.get("mode") != "memory"
+):
+    _engine_kwargs.update(pool_size=40, max_overflow=10)
 engine = create_engine(DATABASE_URL, **_engine_kwargs)
 
 
@@ -57,6 +63,33 @@ def enable_sqlite_tuning(target_engine) -> None:
 
 if _is_sqlite:
     enable_sqlite_tuning(engine)
+
+
+def _is_sqlite_bind(bind) -> bool:
+    return getattr(getattr(bind, "dialect", None), "name", "") == "sqlite"
+
+
+def begin_write(session) -> None:
+    """Take SQLite's write lock now (BEGIN IMMEDIATE) if this session is on
+    SQLite and has not begun a transaction on its connection yet; a no-op
+    on any other database."""
+    bind = session.get_bind()
+    if not _is_sqlite_bind(bind):
+        return
+    raw = session.connection().connection.dbapi_connection
+    if getattr(raw, "in_transaction", False):
+        return
+    raw.execute("BEGIN IMMEDIATE")
+
+
+def _lock_rows_on_sqlite(orm_execute_state) -> None:
+    stmt = orm_execute_state.statement
+    if getattr(stmt, "_for_update_arg", None) is None:
+        return
+    begin_write(orm_execute_state.session)
+
+
+event.listen(Session, "do_orm_execute", _lock_rows_on_sqlite)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

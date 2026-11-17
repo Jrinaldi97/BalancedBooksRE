@@ -133,7 +133,7 @@ def _prepare_locked(data_dir, filename):
         FORCE_HTTPS="false",
         APP_HOST="127.0.0.1",
         SLOWBOOKS_DESKTOP="1",
-        APP_VERSION="0.7.0",
+        APP_VERSION="0.8.0",
     )
     from dotenv import load_dotenv
 
@@ -305,10 +305,37 @@ def main():
     parser.add_argument("--company-file")
     parser.add_argument("--no-window", action="store_true")
     parser.add_argument("--mcp", action="store_true")
+    parser.add_argument(
+        "--export-reviews",
+        action="store_true",
+        help="Read the selected local book and save a review workbook without an HTTP connection",
+    )
+    parser.add_argument(
+        "--review-code", action="append", help="Review type to export (repeatable)"
+    )
     args = parser.parse_args()
     args.data_dir = args.data_dir.resolve()
     filename = args.company_file or selected_company(args.data_dir)
-    _, token_path, default_port = company_paths(args.data_dir, filename)
+    database, token_path, default_port = company_paths(args.data_dir, filename)
+    if args.export_reviews:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session
+        import sqlite3
+
+        os.environ["DATABASE_URL"] = "sqlite://"
+        from app.portfolio.transaction_register import save_register
+
+        engine = create_engine(
+            "sqlite://",
+            creator=lambda: sqlite3.connect(database.as_uri() + "?mode=ro", uri=True),
+        )
+        with Session(engine) as db:
+            print(
+                json.dumps(
+                    save_register(db, args.data_dir / "Exports", args.review_code)
+                )
+            )
+        return 0
     args.port = args.port or default_port
     prepare(args.data_dir.resolve(), filename)
     os.environ["APP_PORT"] = str(args.port)
@@ -335,11 +362,14 @@ def main():
             if server.started:
                 break
             if not thread.is_alive():
+                if matching_server(args.port, token_path):
+                    thread = None
+                    break
                 raise RuntimeError(
                     "The accounting service could not start. The port may be in use."
                 )
             time.sleep(0.1)
-        if not server.started:
+        if thread and not server.started:
             raise RuntimeError("The local accounting server did not become ready")
     if args.mcp:
         os.environ["BALANCEDBOOKS_URL"] = f"http://127.0.0.1:{args.port}"

@@ -163,6 +163,40 @@ def _check_obligation(db, expected, account, correction, obs):
     from app.portfolio.service import fail, get
 
     beneficiary, decoder = _beneficiary(correction, obs)
+    proof = expected.receivable_collection_evidence
+    if (
+        proof
+        and account.role == "receivable"
+        and expected.amount_cents < 0
+        and expected.item
+        and not (expected.party_id or beneficiary or expected.fund_id)
+    ):
+        # An identified reduction of an existing receivable can be evidenced
+        # without asserting a new beneficiary. Require the exact cash-basis
+        # add-back in the same scope and event, plus a linked document version.
+        from app.portfolio.review_workspace import registered
+
+        registered(db, proof.document_id, proof.sha256)
+        adjustment = sum(
+            line["debit_cents"] - line["credit_cents"]
+            for adj in db.query(m.BasisAdjustment).filter_by(
+                event_id=correction.id, entity_id=account.entity_id
+            )
+            for line in adj.lines
+            if line["account_id"] == expected.account_id
+            and all(line.get(k) == getattr(expected, k) for k in DIMENSIONS)
+        )
+        if (
+            adjustment != -expected.amount_cents
+            or not db.query(m.DocumentLink.id)
+            .filter_by(document_id=proof.document_id, event_id=correction.id)
+            .first()
+        ):
+            fail(
+                "collection_evidence",
+                "Match the recorded collection adjustment and its registered supporting document",
+            )
+        return
     if not expected.party_id:
         fail(
             "missing_beneficiary",
@@ -216,7 +250,17 @@ def _check_obligation(db, expected, account, correction, obs):
         )
 
 
-def validate_existing(db, data, actor):
+def _check_balances(
+    db,
+    data,
+    obs,
+    state,
+    original_events,
+    support_ids,
+    dimensions,
+    balances,
+    rows_by_basis,
+):
     from app.portfolio.service import (
         Problem,
         digest,
@@ -226,109 +270,13 @@ def validate_existing(db, data, actor):
         scope,
         validate_lines,
     )
-    from app.portfolio.observation_state import observation_state
-    from app.portfolio.reports import ledger
 
-    obs = get(db, m.BankObservation, data.observation.observation_id)
-    review = get(db, m.ReviewItem, data.observation.review_id)
-    if (
-        review.observation_id != obs.id
-        or review.code != "suspense"
-        or review.status != "open"
-    ):
-        fail("review_state", "Choose this observation's open suspense review")
-    state = observation_state(db, obs.id)
-    if state["state_digest"] != data.observation.expected_state_digest:
-        fail("stale_state", "Observation changed; inspect it again")
-    support_ids = data.supporting_corrective_event_ids or [data.corrective_event_id]
-    if (
-        len(set(support_ids)) != len(support_ids)
-        or data.corrective_event_id not in support_ids
-    ):
-        fail(
-            "correction_lineage",
-            "Support IDs must be unique and include the resolution anchor",
-        )
-    if any(
-        ident == obs.event_id or ident not in state["event_ids"]
-        for ident in support_ids
-    ):
-        fail(
-            "correction_lineage",
-            "Identify a correction explicitly linked to this observation",
-        )
-    if any(state["suspense_residuals"].values()):
-        fail(
-            "correction_residual",
-            "Scoped suspense remains on one or both reporting bases",
-        )
-    account = scope(db, obs.account_id)
-    correction = get(db, m.Event, data.corrective_event_id)
-    if (
-        not db.query(m.JournalScope)
-        .filter_by(event_id=correction.id, entity_id=account.entity_id)
-        .first()
-    ):
-        fail(
-            "wrong_entity",
-            "Correction does not belong to the observed source account entity",
-        )
-    rows_by_basis = {
-        basis: ledger(db, date.max, basis=basis, event_ids=state["event_ids"])
-        for basis in BASES
-    }
-    manifest, original_events = _movements(
-        db, obs, state, data.movement_manifest, rows_by_basis
-    )
-    if set(support_ids) & original_events:
-        fail(
-            "correction_lineage",
-            "An original movement cannot be its family's corrective event",
-        )
-    if not data.balances:
-        proof = data.offsetting_evidence
-        if manifest["kind"] not in {"bank_return", "card_return"} or proof is None:
-            fail(
-                "expected_balance",
-                "A fully offsetting family requires an explicit return manifest and source evidence",
-            )
-        if (
-            not db.query(m.DocumentLocation)
-            .filter_by(document_id=proof.document_id, sha256=proof.sha256)
-            .first()
-            or not db.query(m.DocumentLink)
-            .filter_by(document_id=proof.document_id, event_id=correction.id)
-            .first()
-        ):
-            fail(
-                "return_evidence",
-                "Register and link the exact return evidence to this correction",
-            )
-    beneficiary, decoder = _beneficiary(correction, obs)
-    if beneficiary is not None:
-        get(db, m.Party, beneficiary)
-    # Existing one-bank callers never declared cash_flow. Preserve that
-    # original matching contract unless the caller opts into an expanded scope.
-    complete_scope = (
-        data.supporting_corrective_event_ids is not None
-        or data.movement_manifest is not None
-        or any(
-            row.model_fields_set & {"entity_id", "cash_flow"}
-            or scope(db, row.account_id).entity_id != account.entity_id
-            for row in data.balances
-        )
-    )
-    dimensions = (
-        DIMENSIONS
-        if complete_scope
-        else tuple(key for key in DIMENSIONS if key != "cash_flow")
-    )
     expected_totals = {}
     support_mapping = []
     used_support_ids = set()
     reciprocal = defaultdict(int)
     reciprocal_roles = defaultdict(set)
-    for expected in data.balances:
+    for expected in balances:
         account = scope(db, expected.account_id, expected.entity_id)
         if (
             account.role
@@ -403,6 +351,7 @@ def validate_existing(db, data, actor):
                         "basis": basis,
                         "expected": expected.model_dump(),
                         "actual_cents": actual_amount,
+                        "contributing_lines": matching,
                     },
                 )
             event_totals = defaultdict(int)
@@ -421,7 +370,7 @@ def validate_existing(db, data, actor):
             for ident in candidates
             if all(
                 contributions[basis].get(ident, 0) * expected.amount_cents > 0
-                for basis in BASES
+                for basis in rows_by_basis
             )
         )
         if not supporting:
@@ -448,7 +397,8 @@ def validate_existing(db, data, actor):
                         "event_id": ident,
                         "source_digest": digest(get(db, m.Event, ident).source),
                         "effective_cents_by_basis": {
-                            basis: contributions[basis][ident] for basis in BASES
+                            basis: contributions[basis][ident]
+                            for basis in rows_by_basis
                         },
                         "registered_sources": [
                             {"document_id": doc_id, "sha256": sha}
@@ -471,11 +421,6 @@ def validate_existing(db, data, actor):
                 ],
             }
         )
-    if data.supporting_corrective_event_ids and set(support_ids) - used_support_ids:
-        fail(
-            "unused_support",
-            "Every selected correction must carry a supported economic balance",
-        )
     if any(reciprocal.values()) or any(
         roles != {"due_from", "due_to"} for roles in reciprocal_roles.values()
     ):
@@ -483,7 +428,7 @@ def validate_existing(db, data, actor):
             "intercompany_mismatch",
             "Expected Due From/To must be reciprocal for the exact entities and individual item",
         )
-    for rows in rows_by_basis.values():
+    for basis, rows in rows_by_basis.items():
         actual = defaultdict(int)
         entity_totals = defaultdict(int)
         for row in rows:
@@ -500,22 +445,172 @@ def validate_existing(db, data, actor):
                 "Correction family must balance separately for every entity on both bases",
             )
         if {key: amount for key, amount in actual.items() if amount} != expected_totals:
+            raise Problem(
+                "expected_balance",
+                "Declare every effective economic balance",
+                {"basis": basis, "lines": rows},
+            )
+    return support_mapping, used_support_ids
+
+
+def validate_existing(db, data, actor):
+    from app.portfolio.service import (
+        digest,
+        fail,
+        get,
+        scope,
+    )
+    from app.portfolio.observation_state import observation_state
+    from app.portfolio.ledger_snapshot import LedgerSnapshot
+
+    from app.portfolio.review_workspace import suspense_review
+
+    obs = get(db, m.BankObservation, data.observation.observation_id)
+    review = get(db, m.ReviewItem, data.observation.review_id)
+    if (
+        review.observation_id != obs.id
+        or not suspense_review(db, review)
+        or review.status != "open"
+    ):
+        fail("review_state", "Choose this observation's open suspense review")
+    state = observation_state(db, obs.id)
+    if state["state_digest"] != data.observation.expected_state_digest:
+        fail("stale_state", "Observation changed; inspect it again")
+    routed = data.movement_manifest and data.movement_manifest.kind == "routed_receipt"
+    if routed:
+        from app.portfolio.routed_receipt import routed_family
+
+        state, manifest, original_events, rows_by_basis = routed_family(
+            db, obs, state, data.movement_manifest
+        )
+    support_ids = data.supporting_corrective_event_ids or [data.corrective_event_id]
+    if (
+        len(set(support_ids)) != len(support_ids)
+        or data.corrective_event_id not in support_ids
+    ):
+        fail(
+            "correction_lineage",
+            "Support IDs must be unique and include the resolution anchor",
+        )
+    if any(
+        ident == obs.event_id or ident not in state["event_ids"]
+        for ident in support_ids
+    ):
+        fail(
+            "correction_lineage",
+            "Identify a correction explicitly linked to this observation",
+        )
+    if not routed and any(state["suspense_residuals"].values()):
+        fail(
+            "correction_residual",
+            "Scoped suspense remains on one or both reporting bases",
+        )
+    account = scope(db, obs.account_id)
+    correction = get(db, m.Event, data.corrective_event_id)
+    if not routed and (
+        not db.query(m.JournalScope)
+        .filter_by(event_id=correction.id, entity_id=account.entity_id)
+        .first()
+    ):
+        fail(
+            "wrong_entity",
+            "Correction does not belong to the observed source account entity",
+        )
+    if not routed:
+        rows_by_basis = LedgerSnapshot(
+            db, date.max, event_ids=state["event_ids"]
+        ).project_bases(date.max)
+        manifest, original_events = _movements(
+            db, obs, state, data.movement_manifest, rows_by_basis
+        )
+    if set(support_ids) & original_events:
+        fail(
+            "correction_lineage",
+            "An original movement cannot be its family's corrective event",
+        )
+    if not data.balances and not data.balances_by_basis:
+        proof = data.offsetting_evidence
+        if manifest["kind"] not in {"bank_return", "card_return"} or proof is None:
             fail(
                 "expected_balance",
-                "Expected balances must describe the entire effective economic classification",
+                "A fully offsetting family requires an explicit return manifest and source evidence",
             )
+        if (
+            not db.query(m.DocumentLocation)
+            .filter_by(document_id=proof.document_id, sha256=proof.sha256)
+            .first()
+            or not db.query(m.DocumentLink)
+            .filter_by(document_id=proof.document_id, event_id=correction.id)
+            .first()
+        ):
+            fail(
+                "return_evidence",
+                "Register and link the exact return evidence to this correction",
+            )
+    beneficiary, decoder = _beneficiary(correction, obs)
+    if beneficiary is not None:
+        get(db, m.Party, beneficiary)
+    # Existing one-bank callers never declared cash_flow. Preserve that
+    # original matching contract unless the caller opts into an expanded scope.
+    complete_scope = (
+        data.balances_by_basis is not None
+        or data.supporting_corrective_event_ids is not None
+        or data.movement_manifest is not None
+        or any(
+            row.model_fields_set & {"entity_id", "cash_flow"}
+            or scope(db, row.account_id).entity_id != account.entity_id
+            for row in data.balances
+        )
+    )
+    dimensions = (
+        DIMENSIONS
+        if complete_scope
+        else tuple(key for key in DIMENSIONS if key != "cash_flow")
+    )
+    support_mapping = []
+    used = set()
+    checks = [(data.balances, rows_by_basis)]
+    if data.balances_by_basis:
+        checks = [
+            (getattr(data.balances_by_basis, basis), {basis: rows})
+            for basis, rows in rows_by_basis.items()
+        ]
+    for declaration, projection in checks:
+        mapping, used_here = _check_balances(
+            db,
+            data,
+            obs,
+            state,
+            original_events,
+            support_ids,
+            dimensions,
+            declaration,
+            projection,
+        )
+        support_mapping.extend(mapping)
+        used.update(used_here)
+    if (
+        routed or data.balances_by_basis or data.supporting_corrective_event_ids
+    ) and set(support_ids) - used:
+        fail(
+            "unused_support",
+            "Every selected correction must carry a supported economic balance",
+        )
     review.status = "resolved"
     review.resolved_event_id = correction.id
     review.resolution = json.dumps(
         {
             "method": "validated_existing_correction",
-            "proof_version": 2,
+            "proof_version": 3 if routed or data.balances_by_basis else 2,
             "supporting_corrective_event_ids": sorted(support_ids),
             "obligation_support": support_mapping,
             "support_digest": digest(support_mapping),
             "evidence": data.evidence,
             "state_digest": state["state_digest"],
             "balances": [row.model_dump() for row in data.balances],
+            "balances_by_basis": (
+                data.balances_by_basis.model_dump() if data.balances_by_basis else None
+            ),
             "movement_manifest": manifest,
             "beneficiary_decoder": decoder,
             "offsetting_evidence": (

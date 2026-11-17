@@ -272,9 +272,14 @@ _INTENTIONAL_BACKEND_ONLY: set[tuple[str, str]] = {
     ("GET", "/api/portfolio/invoice-state"),  # Agent supplier invoice guard.
     ("GET", "/api/portfolio/mortgage-state"),  # Agent debt-state guard.
     # Machine interface called by app/portfolio/mcp_server.py, outside the SPA.
-    ("GET", "/api/portfolio/observations/{ident}/state"),
     ("GET", "/api/portfolio/observation-states"),
     ("GET", "/api/portfolio/verification-export"),
+    ("GET", "/api/portfolio/transaction-register"),
+    ("GET", "/api/portfolio/transaction-family/{ident}"),
+    ("GET", "/api/portfolio/identity-mappings"),
+    ("GET", "/api/portfolio/receipt-candidates"),
+    ("GET", "/api/portfolio/movement-check"),
+    ("POST", "/api/portfolio/review-workbook"),
     ("GET", "/api/portfolio/proposals/{ident}"),
     ("GET", "/api/portfolio/requests"),
     # These have native MCP callers, verified by test_portfolio_mcp_filters.

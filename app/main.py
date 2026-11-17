@@ -21,6 +21,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
+from starlette.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -875,7 +876,9 @@ async def require_session(request: Request, call_next):
         # deactivated, its role or password changed since, or the row is
         # gone. The role comes from the row too, so a demotion takes effect
         # on the next request instead of living in the cookie.
-        state, db_role, db_version = _check_session_user(request.session)
+        state, db_role, db_version = await run_in_threadpool(
+            _check_session_user, request.session
+        )
         if state == "revoked":
             request.session.clear()
             return JSONResponse(
@@ -900,7 +903,9 @@ async def require_session(request: Request, call_next):
         # exactly like a user. Session auth always wins when present.
         auth_header = request.headers.get("authorization") or ""
         if auth_header.startswith("Bearer "):
-            token_principal = _resolve_api_token(auth_header[7:].strip())
+            token_principal = await run_in_threadpool(
+                _resolve_api_token, auth_header[7:].strip()
+            )
         if token_principal is None:
             return JSONResponse(
                 status_code=401,

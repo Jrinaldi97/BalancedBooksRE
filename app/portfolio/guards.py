@@ -95,3 +95,18 @@ def install(connection):
             WHEN EXISTS(SELECT 1 FROM re_transfer_associations WHERE id=NEW.id OR supersedes_id=NEW.supersedes_id)
             BEGIN SELECT RAISE(ABORT,'Transfer association history is immutable'); END"""
         )
+
+    if inspect(connection).has_table("re_research_records"):
+        install_research_guards(connection)
+
+
+def install_research_guards(connection):
+    for action in ("UPDATE", "DELETE"):
+        connection.exec_driver_sql(
+            f"CREATE TRIGGER IF NOT EXISTS re_research_{action} BEFORE {action} ON re_research_records BEGIN SELECT RAISE(ABORT,'Research history is immutable'); END"
+        )
+    connection.exec_driver_sql(
+        """CREATE TRIGGER IF NOT EXISTS re_research_replace BEFORE INSERT ON re_research_records
+    WHEN EXISTS(SELECT 1 FROM re_research_records WHERE id=NEW.id OR supersedes_id=NEW.supersedes_id)
+    BEGIN SELECT RAISE(ABORT,'Research history is immutable'); END"""
+    )

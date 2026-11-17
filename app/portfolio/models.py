@@ -419,3 +419,23 @@ from app.portfolio.card_models import (  # noqa: E402
     CardCoverage as CardCoverage,
     CardActivity as CardActivity,
 )
+
+
+class ResearchRecord(Base):
+    """Append-only workpapers and versioned relationships, separate from journals."""
+
+    __tablename__ = "re_research_records"
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(50), nullable=False, index=True)
+    observation_id = Column(Integer, ForeignKey("re_bank_observations.id"), index=True)
+    related_observation_id = Column(
+        Integer, ForeignKey("re_bank_observations.id"), index=True
+    )
+    review_id = Column(Integer, ForeignKey("re_review_items.id"), index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), index=True)
+    property_id = Column(Integer, ForeignKey("re_properties.id"), index=True)
+    supersedes_id = Column(Integer, ForeignKey("re_research_records.id"), unique=True)
+    amount_cents = Column(Integer)
+    payload = Column(JSON, nullable=False)
+    actor = Column(String(200), nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)

@@ -5,6 +5,10 @@ Notable changes between releases. Format roughly follows
 used during development is captured here so the README can stay focused
 on what the software does, not on what sprint shipped what.
 
+## BalancedBooksRE 0.8.0 — November 17, 2026
+
+Add source-verified card journal linkage, separate basis declarations, three-leg receipt validation, auditable review retyping and transaction-level Excel exports. Add versioned research, partial component classification, evidenced settlement links, processor batch reconciliation and account/site history. The native agent can reconcile observed bank or issuer movements to the ledger, inspect discrepancies and recover exports without an HTTP connection. Schema bb0008 adds the indexed workpaper table. SQLite payment concurrency and authentication under load include selected upstream fixes. See the 0.8.0 guide in BALANCEDBOOKSRE.md.
+
 ## BalancedBooksRE 0.6.0 — October 30, 2026
 
 Add explicit multi-event correction validation, capacity-checked transfer

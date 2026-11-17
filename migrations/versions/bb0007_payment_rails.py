@@ -30,6 +30,14 @@ def upgrade():
 
 
 def downgrade():
-    raise RuntimeError(
-        "Restore a verified backup; Payment Rail evidence must not be discarded."
-    )
+    bind = op.get_bind()
+    if not sa.inspect(bind).has_table("re_bank_observations"):
+        return
+    if bind.exec_driver_sql("SELECT 1 FROM re_bank_observations LIMIT 1").first():
+        raise RuntimeError(
+            "Restore a verified backup; Payment Rail evidence must not be discarded."
+        )
+    if bind.dialect.name == "sqlite":
+        for suffix in ("default", "INSERT", "UPDATE"):
+            bind.exec_driver_sql(f"DROP TRIGGER IF EXISTS re_payment_rail_{suffix}")
+    op.drop_column("re_bank_observations", "payment_rail")

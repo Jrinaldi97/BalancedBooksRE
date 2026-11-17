@@ -159,3 +159,37 @@ preview, retry and immutable receipt workflows, recording previous/current rail,
 actor and evidence. Rail metadata can be corrected for posted activity, inactive
 accounts and closed periods; it creates no accounting entries and closes no
 reviews. Full and compact observation state and record reads expose the field.
+
+## Transaction research and validation in 0.8.0
+
+The native contract release is `2026.11-review-workflows.8` and the database revision is `bb0008`. Open `context` for the company file and build identity. Request `command_schemas` for the named operations before preparing a change.
+
+| Task | Native workflow |
+|---|---|
+| Find open work | `transaction_register` accepts an array of review codes. Use `unallocated_property` and `suspense` for the property and suspense register. Read selected flags, distinct observations, overlaps and standalone flags together. Use its book digest for subsequent pages. |
+| Inspect or export a transaction | `transaction_family` pages original observations, accounting events, journals, effective lines on both bases, source versions and workpapers. `export_review_workbook` saves a one-tab XLSX in the local application data directory's Exports folder. Each transaction has one register row, followed by labeled supporting rows. Long JSON records continue on additional rows. Editable research cells stay in the exported workbook. |
+| Link an imported card charge | `link_existing_card_journal` takes the observation ID and digest, provider transaction ID, event ID, journal ID and evidence. Preview identifies the existing liability movement. Committing makes the observation eligible for the existing coverage reconciliation. |
+| Close an already-corrected review | `validate_existing_correction` accepts either the original common balances or `balances_by_basis` with complete accrual and modified-cash declarations. Use the supporting event set when different journals supply different parts. To validate a source-backed reduction of a named receivable with a matching cash-basis add-back, supply `receivable_collection_evidence` on that balance. |
+| Validate a forwarded receipt | Set the movement manifest kind to `routed_receipt`. Declare the received deposit, forwarding withdrawal and beneficiary deposit in order, with all three IDs, accounts, dates and signed amounts. Each reviewed observation keeps its own state guard. Shared correction events are counted once. The proof retains individual and group residuals on each basis. |
+| Track a blockage | `retype_review` marks an open review as `software_limitation` or `evidence_gap`, or restores its original type. The receipt and workpaper keep the source, reason and previous type. Obtain a fresh observation state before retrying the specific resolution. |
+| Keep research and apply part of a payment | `record_transaction_research` records facts, candidates, rejections, conflicts, missing evidence and proposed components with typed sources, optional document hashes, pages and source events. Supersede an obsolete assertion by ID. For an ordinary posted bank observation, `correct_posted_components` applies selected proposed components to supported accounts and keeps the review open for the remainder. Use the existing pooled split, card or obligation workflows for those account types. |
+| Compare receipts and settlements | `receipt_candidates` shows identifiers that agree, disagree or remain unverified. Document a conflict between a check stub and the cleared amount separately. The bank observation preserves the actual movement. `link_observation_application` records evidenced partial reimbursements and refunds between existing postings with capacity and duplicate checks. `record_processor_batch` ties individually sourced gross receipts, fees, tenant references and beneficiaries to the net bank deposit. These workpapers create no new journal. |
+| Trace an account or site | `record_identity_mapping` records effective-dated legal ownership, operating entity, retired alias, replacement account or parent site. `identity_mappings` retrieves these relationships by account, property, alias and date. Account mapping previews include affected observation counts. Apply an evidenced transaction-specific classification separately. |
+| Check a bank or issuer account | `movement_check` compares dated signed observations to identifiable journal movements. Inspect unlinked observations and unexplained journal amounts separately from opening entries. A tie is an internal movement check. Statement coverage remains a separate question. |
+
+### Recovering local agent access
+
+If a command times out, retrieve `operation_status`, `request_result` or `run_manifest` with the same key. Reconnect the native stdio adapter and read `context` again after a company switch or upgrade. A prepared proposal has its own digest. Check the committed receipt and effect digest before recording a verification.
+
+When a restricted client cannot open loopback HTTP, use the registered BalancedBooksRE connector. If the connector is unavailable, the installed executable can produce the same workbook directly from a read-only SQLite snapshot. It opens the selected company and reports the local workbook path. This mode requires read access to the book and write access to its Exports folder.
+
+```sh
+"$HOME/Applications/BalancedBooksRE.app/Contents/MacOS/BalancedBooksRE" \
+  --export-reviews --review-code unallocated_property --review-code suspense
+```
+
+### SlowBooks comparison
+
+The prior selective port reviewed SlowBooks through `197271ca`. This release compares the later changes through `7cdb73e2`. It incorporates the SQLite write-lock fix for simultaneous payments from `e6c3a1fd` and adapts the off-event-loop authentication and SQLite pool changes from `1123e387` to BBRE's native bearer-token path. Concurrent native launches recheck the authenticated company listener if another process acquires the port.
+
+Upstream Books Check inspired the dated native movement reconciliation. BBRE uses its own observation, journal and basis models. The upstream feed deduplication and classification suggestions informed explicit receipt comparison. Repeated equal bank charges remain separately inspectable. The newer upstream QuickBooks conversion, payroll, sales and invoice-to-purchase-order screens target different workflows from portfolio bookkeeping through MCP.

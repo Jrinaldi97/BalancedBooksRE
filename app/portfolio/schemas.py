@@ -1,5 +1,6 @@
 """Strict, discoverable input contracts shared by UI, CLI and AI tools."""
 
+from app.portfolio.payment_rails import PaymentRail
 from app.schemas.common import StrictModel
 from datetime import date
 from typing import Literal, Annotated
@@ -147,9 +148,6 @@ class Posting(Input):
     corrects_id: Id | None = None
     observed: bool = False
     release_reason: str | None = None
-
-
-from app.portfolio.payment_rails import PaymentRail
 
 
 class PaymentRailInput(Input):
@@ -577,6 +575,7 @@ class BeneficiaryEvidence(Input):
 
 
 class ExpectedCorrectionBalance(Input):
+    receivable_collection_evidence: BeneficiaryEvidence | None = None
     beneficiary_evidence: BeneficiaryEvidence | None = None
     account_id: Id
     entity_id: Id | None = None
@@ -599,9 +598,21 @@ class CorrectionSourceMovement(Input):
 
 class CorrectionMovementManifest(Input):
     kind: Literal[
-        "single_bank", "paired_bank", "card_liability", "bank_return", "card_return"
+        "single_bank",
+        "paired_bank",
+        "card_liability",
+        "bank_return",
+        "card_return",
+        "routed_receipt",
     ]
-    observations: list[CorrectionSourceMovement] = Field(min_length=1, max_length=2)
+    observations: list[CorrectionSourceMovement] = Field(min_length=1, max_length=3)
+
+
+class BasisBalances(Input):
+    accrual: list[ExpectedCorrectionBalance] = Field(min_length=1, max_length=100)
+    modified_cash_bank_posting: list[ExpectedCorrectionBalance] = Field(
+        min_length=1, max_length=100
+    )
 
 
 class ValidateExistingCorrectionInput(Input):
@@ -613,7 +624,17 @@ class ValidateExistingCorrectionInput(Input):
         max_length=100,
         description="Complete bounded support set, including corrective_event_id as the legacy resolution anchor. Every event must carry effective economic value in this source family.",
     )
-    balances: list[ExpectedCorrectionBalance] = Field(min_length=0, max_length=100)
+    balances: list[ExpectedCorrectionBalance] = Field(
+        default_factory=list, max_length=100
+    )
+    balances_by_basis: BasisBalances | None = None
+
+    @model_validator(mode="after")
+    def one_declaration(self):
+        if self.balances_by_basis and self.balances:
+            raise ValueError("Choose balances or balances_by_basis")
+        return self
+
     offsetting_evidence: BeneficiaryEvidence | None = None
     movement_manifest: CorrectionMovementManifest | None = None
     evidence: str = Field(min_length=1)
@@ -861,3 +882,137 @@ class RelocateDocumentInput(Input):
 
 
 CONTRACTS["relocate_document"] = RelocateDocumentInput
+
+
+class LinkExistingCard(Input):
+    observation_id: Id
+    expected_state_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    journal_id: Id
+    event_id: Id
+    provider_transaction_id: str = Field(min_length=1, max_length=200)
+    evidence: str = Field(min_length=1)
+
+
+class RetypeReview(Input):
+    review_id: Id
+    expected_code: str = Field(min_length=1, max_length=50)
+    new_code: str = Field(min_length=1, max_length=50)
+    evidence: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    error_code: str | None = Field(default=None, max_length=100)
+
+
+class ResearchSource(Input):
+    kind: Literal[
+        "check_front",
+        "endorsed_back",
+        "stub",
+        "issued_register",
+        "invoice",
+        "deposit_confirmation",
+        "bank_statement",
+        "issuer_statement",
+        "receipt",
+        "external",
+        "user",
+    ]
+    reference: str = Field(min_length=1)
+    document_id: Id | None = None
+    sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    page_or_row: str | None = None
+    event_id: Id | None = None
+
+
+class ResearchInput(Input):
+    observation_id: Id
+    kind: Literal[
+        "confirmed_fact",
+        "candidate_match",
+        "rejected_match",
+        "open_question",
+        "evidence_conflict",
+        "proposed_component",
+        "missing_source",
+    ]
+    description: str = Field(min_length=1)
+    confidence: Literal["unknown", "low", "medium", "high", "confirmed"]
+    sources: list[ResearchSource] = Field(min_length=1, max_length=100)
+    supersedes_id: Id | None = None
+    related_observation_id: Id | None = None
+    amount_cents: Cents | None = None
+    natural_account_id: Id | None = None
+    entity_id: Id | None = None
+    property_id: Id | None = None
+    unit_id: Id | None = None
+    check_number: str | None = None
+    issue_date: date | None = None
+    clearing_date: date | None = None
+    order_id: str | None = None
+    card_alias: str | None = None
+    tax_cents: Cents | None = None
+    items: list[str] = Field(default_factory=list, max_length=200)
+    delivery_address: str | None = None
+
+
+class ObservationApplication(Input):
+    source_observation_id: Id
+    settlement_observation_id: Id
+    kind: Literal["reimbursement", "refund", "processor_batch"]
+    amount_cents: Cents = Field(gt=0)
+    evidence: BeneficiaryEvidence
+    supersedes_id: Id | None = None
+    reverse: bool = False
+
+
+class IdentityMapping(Input):
+    account_id: Id | None = None
+    property_id: Id | None = None
+    legal_entity_id: Id | None = None
+    operating_entity_id: Id | None = None
+    replacement_account_id: Id | None = None
+    alias: str | None = Field(default=None, max_length=200)
+    site_property_id: Id | None = None
+    start: date
+    end: date | None = None
+    exceptions: str | None = None
+    evidence: BeneficiaryEvidence
+    supersedes_id: Id | None = None
+
+
+CONTRACTS.update(
+    link_existing_card_journal=LinkExistingCard,
+    retype_review=RetypeReview,
+    record_transaction_research=ResearchInput,
+    link_observation_application=ObservationApplication,
+    record_identity_mapping=IdentityMapping,
+)
+
+
+class ApplyComponents(PostedTransferLeg):
+    component_ids: list[Id] = Field(min_length=1, max_length=100)
+    evidence: str = Field(min_length=1)
+
+
+CONTRACTS["correct_posted_components"] = ApplyComponents
+
+
+class ProcessorReceipt(Input):
+    provider_transaction_id: str = Field(min_length=1, max_length=200)
+    gross_cents: Cents = Field(gt=0)
+    fee_cents: Cents = 0
+    beneficiary_entity_id: Id
+    property_id: Id | None = None
+    tenant_reference: str = Field(min_length=1, max_length=200)
+    source_row: str = Field(min_length=1, max_length=200)
+
+
+class ProcessorBreakdown(Input):
+    observation_id: Id
+    processor: str = Field(min_length=1, max_length=100)
+    batch_id: str = Field(min_length=1, max_length=200)
+    receipts: list[ProcessorReceipt] = Field(min_length=1, max_length=1000)
+    evidence: BeneficiaryEvidence
+    supersedes_id: Id | None = None
+
+
+CONTRACTS["record_processor_batch"] = ProcessorBreakdown

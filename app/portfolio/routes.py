@@ -104,7 +104,7 @@ def context(db: Session = Depends(get_db)):
             "company_file": Path(database).name if database else None,
             "database_engine": db.get_bind().dialect.name,
             "upstream_base_version": __version__,
-            "portfolio_release": "2026.11-payment-rails.7",
+            "portfolio_release": "2026.11-review-workflows.8",
             "schema_revisions": versions,
             "command_schema_digest": svc.digest(commands()),
             "company_session_id": runtime.company_session_id(db),
@@ -1014,5 +1014,128 @@ def document_state(
 
     try:
         return read(db, document_id, verify_local)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/transaction-register")
+def transaction_register(
+    codes: list[str] | None = Query(None),
+    status: str = "open",
+    after_id: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    expected_book_digest: str | None = None,
+    db: Session = Depends(get_db),
+):
+    from app.portfolio.transaction_register import register_page
+
+    try:
+        return register_page(db, codes, status, after_id, limit, expected_book_digest)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/transaction-family/{ident}")
+def transaction_family(
+    ident: int,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(40, ge=1, le=200),
+    expected_book_digest: str | None = None,
+    db: Session = Depends(get_db),
+):
+    from app.portfolio.transaction_register import family_page
+
+    try:
+        return family_page(db, ident, offset, limit, expected_book_digest)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/identity-mappings")
+def identity_mappings(
+    account_id: int | None = None,
+    property_id: int | None = None,
+    alias: str | None = None,
+    as_of: date | None = None,
+    db: Session = Depends(get_db),
+):
+    from app.portfolio.transaction_register import mappings
+
+    return {"mappings": mappings(db, account_id, property_id, alias, as_of)}
+
+
+@router.post("/review-workbook")
+def review_workbook(
+    codes: list[str] | None = Query(None),
+    status: str = "open",
+    expected_book_digest: str | None = None,
+    db: Session = Depends(get_db),
+):
+    import os
+    from pathlib import Path
+    from app.portfolio.transaction_register import save_register
+
+    if os.environ.get("SLOWBOOKS_DESKTOP") != "1" or not os.environ.get(
+        "SLOWBOOKS_DATA_DIR"
+    ):
+        raise HTTPException(
+            409, detail="Workbook files are saved by the native desktop service"
+        )
+    try:
+        return save_register(
+            db,
+            Path(os.environ["SLOWBOOKS_DATA_DIR"]) / "Exports",
+            codes,
+            status,
+            expected_book_digest,
+        )
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/receipt-candidates")
+def receipt_candidates(
+    account_id: int,
+    start: date,
+    end: date,
+    amount_cents: int,
+    provider_id: str | None = None,
+    order_id: str | None = None,
+    alias: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    from app.portfolio.transaction_register import receipt_candidates as read
+
+    try:
+        return read(
+            db,
+            account_id,
+            start,
+            end,
+            amount_cents,
+            provider_id,
+            order_id,
+            alias,
+            limit,
+        )
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
+@router.get("/movement-check")
+def movement_check(
+    account_id: int,
+    start: date,
+    end: date,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+    expected_book_digest: str | None = None,
+    db: Session = Depends(get_db),
+):
+    from app.portfolio.transaction_register import movement_check as read
+
+    try:
+        return read(db, account_id, start, end, offset, limit, expected_book_digest)
     except svc.Problem as exc:
         raise error(exc) from exc
