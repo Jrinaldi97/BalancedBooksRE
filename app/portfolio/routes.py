@@ -104,7 +104,7 @@ def context(db: Session = Depends(get_db)):
             "company_file": Path(database).name if database else None,
             "database_engine": db.get_bind().dialect.name,
             "upstream_base_version": __version__,
-            "portfolio_release": "2026.11-review-workflows.8",
+            "portfolio_release": "2026.11-fund-attribution.9",
             "schema_revisions": versions,
             "command_schema_digest": svc.digest(commands()),
             "company_session_id": runtime.company_session_id(db),
@@ -863,6 +863,18 @@ def outgoing_funding_assessment(observation_id: int, db: Session = Depends(get_d
         raise error(exc) from exc
 
 
+@router.get("/outgoing-funding-assessments")
+def outgoing_funding_assessments(
+    ids: list[int] = Query(min_length=1, max_length=100), db: Session = Depends(get_db)
+):
+    from app.portfolio.outgoing_funding import outgoing_funding_assessments as assess
+
+    try:
+        return assess(db, ids)
+    except svc.Problem as exc:
+        raise error(exc) from exc
+
+
 @router.get("/owner-custody-state/{item_id}")
 def owner_custody_state(item_id: int, db: Session = Depends(get_db)):
     from app.portfolio.owner_distributions import owner_custody_state as read_state
@@ -1096,13 +1108,15 @@ def review_workbook(
 @router.get("/receipt-candidates")
 def receipt_candidates(
     account_id: int,
-    start: date,
-    end: date,
     amount_cents: int,
+    start: date | None = None,
+    end: date | None = None,
     provider_id: str | None = None,
     order_id: str | None = None,
     alias: str | None = None,
     limit: int = Query(50, ge=1, le=200),
+    after_id: int = Query(0, ge=0),
+    expected_book_digest: str | None = None,
     db: Session = Depends(get_db),
 ):
     from app.portfolio.transaction_register import receipt_candidates as read
@@ -1118,6 +1132,8 @@ def receipt_candidates(
             order_id,
             alias,
             limit,
+            after_id,
+            expected_book_digest,
         )
     except svc.Problem as exc:
         raise error(exc) from exc

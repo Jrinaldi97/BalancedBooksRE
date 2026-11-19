@@ -34,12 +34,21 @@ def funded(db_session, request):
     debtor = run(
         db, "create_party", code="DEBTOR", name="Actual debtor", kind="individual"
     )["party_id"]
+    source_party = owner
+    if config.get("source_kind"):
+        source_party = run(
+            db,
+            "create_party",
+            code="POOL-PARTY",
+            name="Source beneficiary",
+            kind=config["source_kind"],
+        )["party_id"]
     unknown = run(
         db,
         "create_fund",
         code="UNKNOWN",
         holder_entity_id=e,
-        beneficiary_id=owner,
+        beneficiary_id=source_party,
         purpose="unresolved",
         restriction=config.get("restriction", "unrestricted"),
     )["fund_id"]
@@ -636,3 +645,287 @@ def test_partial_source_cannot_choose_between_different_existing_dimensions(fund
         execute(db, cmd)
     assert error.value.code == "funding_scope"
     assert db.query(m.LineAllocation).count() == 1
+
+
+@pytest.mark.parametrize(
+    "funded",
+    [
+        {
+            "source_kind": "allocation_pending",
+            "restriction": "Client and operating allocation pending",
+        }
+    ],
+    indirect=True,
+)
+def test_retyped_funding_review_binds_placeholder_to_own_fund(funded):
+    db, e, bank, unknown, own, obs, _, result = funded
+    review_id = result["open_funding_review_ids"][0]
+    run(
+        db,
+        "retype_review",
+        review_id=review_id,
+        expected_code="funding_source",
+        new_code="software_limitation",
+        source="Prior preview",
+        evidence="Allocation pending",
+    )
+    policy = run(
+        db,
+        "record_policy",
+        entity_id=e,
+        topic="Verified source",
+        start="2026-01-01",
+        guidance="Company operating cash",
+        treatment="Reassign this withdrawal",
+        reviewed_by="Test reviewer",
+        evidence="Bank records",
+        assumptions={"observation_ids": [obs]},
+    )
+    cmd = command(funded)
+    cmd["data"]["evidence_policy_id"] = policy["policy_id"]
+    receipt = execute(db, cmd)
+    assert receipt["resolved_review_ids"] == [review_id]
+    assert receipt["availability"][0]["withdrawal_day_floor_cents"] == {
+        "2026-01-10": 7000
+    }
+    event = db.get(m.Event, receipt["event_id"])
+    assert (
+        event.source["review_id"] == review_id
+        and event.source["evidence_policy_id"] == policy["policy_id"]
+    )
+    state = observation_state(db, obs)
+    assert state["cash_lineage"]["physical_line_ids"] == [receipt["physical_line_id"]]
+    assert state["cash_lineage"]["effective_components"][0]["fund_id"] == own
+    assert balance(db, bank, fund_id=unknown) == 0
+    assert all(
+        r["status"] == "resolved" for r in state["reviews"] if r["code"] == "suspense"
+    )
+
+
+@pytest.mark.parametrize(
+    "funded",
+    [
+        {"source_kind": "individual"},
+        {
+            "source_kind": "individual",
+            "restriction": "Client and operating allocation pending",
+        },
+        {
+            "source_kind": "allocation_pending",
+            "restriction": "Restricted client trust pending allocation",
+        },
+    ],
+    indirect=True,
+)
+def test_named_or_restricted_source_cannot_be_overridden_by_evidence(funded):
+    db = funded[0]
+    with pytest.raises(Problem) as exc:
+        execute(db, command(funded))
+    assert exc.value.code == "client_financing"
+    assert db.query(m.LineAllocation).count() == 0
+
+
+def test_unrelated_software_review_and_out_of_scope_policy_reject(funded):
+    db, e, _, _, _, obs, _, result = funded
+    other = m.ReviewItem(
+        code="software_limitation",
+        entity_id=e,
+        event_id=result["event_id"],
+        observation_id=obs,
+        detail="Different question",
+    )
+    db.add(other)
+    db.flush()
+    cmd = command(funded)
+    cmd["data"]["review_id"] = other.id
+    with pytest.raises(Problem) as exc:
+        execute(db, cmd)
+    assert exc.value.code == "review_state"
+    policy = run(
+        db,
+        "record_policy",
+        entity_id=e,
+        topic="Other date",
+        start="2026-02-01",
+        guidance="Source",
+        treatment="Verified",
+        reviewed_by="Reviewer",
+        evidence="Evidence",
+    )
+    cmd = command(funded)
+    cmd["data"]["evidence_policy_id"] = policy["policy_id"]
+    with pytest.raises(Problem) as exc:
+        execute(db, cmd)
+    assert exc.value.code == "funding_evidence"
+    assert db.query(m.LineAllocation).count() == 0
+
+
+def test_same_day_inflow_cannot_fund_earlier_withdrawal(funded):
+    db, e, bank, _, own, _, _, _ = funded
+    equity = control(db, e, "equity")
+    journal(
+        db,
+        e,
+        "2026-01-05",
+        [ln(bank, -9000, fund_id=own), ln(equity, 9000)],
+        observed=True,
+    )
+    journal(
+        db,
+        e,
+        "2026-01-10",
+        [ln(bank, 9000, fund_id=own), ln(equity, -9000)],
+        observed=True,
+    )
+    with pytest.raises(Problem) as exc:
+        execute(db, command(funded))
+    assert exc.value.code == "funding_availability"
+    assert exc.value.details["withdrawal_day_floor_cents"] == -2000
+    assert exc.value.details["closing_cents"] == 7000
+    assert db.query(m.LineAllocation).count() == 0
+
+
+@pytest.mark.parametrize("second_amount,success", [(6000, True), (8000, False)])
+def test_batch_spends_available_funds_once_or_rolls_back(
+    funded, second_amount, success
+):
+    from app.portfolio.outgoing_funding import outgoing_funding_assessments
+
+    db, _, bank, unknown, own, first, debtor, _ = funded
+    second = bank_rows(
+        db,
+        bank,
+        [dict(date="2026-01-10", amount_cents=-second_amount)],
+        name="second.csv",
+    )[0]
+    run(
+        db, "post_bank", observation_id=second, fund_id=unknown, rationale="Unallocated"
+    )
+    state = observation_state(db, second)
+    suspense = next(r for r in state["reviews"] if r["code"] == "suspense")
+    obligation = run(
+        db,
+        "correct_posted_party_balance",
+        observation=dict(
+            observation_id=second,
+            review_id=suspense["id"],
+            expected_state_digest=state["state_digest"],
+        ),
+        party_id=debtor,
+        code="SECOND",
+        kind="party_receivable",
+        date="2026-01-10",
+        evidence="Second obligation",
+    )
+    a, b = outgoing_funding_assessments(db, [first, second])["assessments"]
+    first_detail = command(funded)["data"]
+    assert a["funding_digest"] == first_detail["expected_funding_digest"]
+    second_detail = {
+        **first_detail,
+        "observation_id": second,
+        "review_id": obligation["open_funding_review_ids"][0],
+        "obligation_event_id": obligation["event_id"],
+        "item": "SECOND",
+        "expected_state_digest": b["state_digest"],
+        "expected_funding_digest": b["funding_digest"],
+        "components": [
+            dict(
+                source_fund_id=unknown,
+                own_fund_id=own,
+                amount_cents=second_amount,
+                evidence="Second source",
+            )
+        ],
+    }
+    cmd = {
+        "operation": "resolve_outgoing_funding_batch",
+        "key": "independent-withdrawals",
+        "data": {"withdrawals": [first_detail, second_detail]},
+    }
+    if success:
+        receipt = execute(db, cmd)
+        assert len(set(receipt["event_ids"])) == 2
+        assert receipt["availability"][0]["minimum_closing_cents"] == 1000
+        assert receipt["review_lifecycle"]["gross_closures"] == 2
+        assert execute(db, cmd)["replayed"]
+    else:
+        events_before = db.query(m.Event).count()
+        with pytest.raises(Problem) as exc:
+            execute(db, cmd)
+        assert exc.value.code == "funding_availability"
+        assert db.query(m.Event).count() == events_before
+        assert db.query(m.LineAllocation).count() == 0
+        assert all(
+            db.get(m.ReviewItem, w["review_id"]).status == "open"
+            for w in cmd["data"]["withdrawals"]
+        )
+
+
+def test_escrow_is_never_an_eligible_target_even_if_held_by_payer(funded):
+    db, e, _, _, _, obs, _, _ = funded
+    party = db.query(m.Party).filter_by(entity_id=e).one().id
+    escrow = run(
+        db,
+        "create_fund",
+        code="ESCROW",
+        holder_entity_id=e,
+        beneficiary_id=party,
+        purpose="escrow",
+        restriction="Held in trust",
+    )["fund_id"]
+    assert escrow not in outgoing_funding_assessment(db, obs)["eligible_own_fund_ids"]
+    cmd = command(funded)
+    cmd["data"]["components"][0]["own_fund_id"] = escrow
+    with pytest.raises(Problem) as exc:
+        execute(db, cmd)
+    assert exc.value.code == "funding_owner"
+
+
+def test_earlier_withdrawal_cannot_use_later_historical_allocation(funded):
+    db, e, bank, unknown, own, _, _, _ = funded
+    equity = control(db, e, "equity")
+    journal(
+        db,
+        e,
+        "2026-01-05",
+        [ln(bank, -9000, fund_id=own), ln(equity, 9000)],
+        observed=True,
+    )
+    arrival = journal(
+        db,
+        e,
+        "2026-01-06",
+        [ln(bank, 8000, fund_id=unknown), ln(equity, -8000)],
+        observed=True,
+    )
+    line = next(
+        r
+        for r in ledger(db, date.max, event_ids=[arrival["event_id"]])
+        if r["account_id"] == bank
+    )
+    db.add(
+        m.LineAllocation(
+            line_id=line["line_id"],
+            event_id=arrival["event_id"],
+            date=date(2026, 1, 12),
+            components=[{"amount_cents": 8000, "fund_id": own}],
+            evidence="Later dated allocation",
+        )
+    )
+    db.flush()
+    with pytest.raises(Problem) as exc:
+        execute(db, command(funded))
+    assert exc.value.code == "funding_availability"
+    assert exc.value.details["date"] == "2026-01-10"
+
+
+def test_attribution_respects_original_period_and_preview_state(funded):
+    db, e, _, _, _, _, _, _ = funded
+    cmd = command(funded)
+    # Model a historical close already on file while an attribution is pending.
+    db.get(m.Entity, e).closed_through = date(2026, 1, 31)
+    db.flush()
+    with pytest.raises(Problem) as exc:
+        execute(db, cmd)
+    assert exc.value.code == "closed_period"
+    assert db.query(m.LineAllocation).count() == 0

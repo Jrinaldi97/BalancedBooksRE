@@ -719,6 +719,7 @@ class FundingComponent(Input):
 
 
 class OutgoingFundingResolution(Input):
+    evidence_policy_id: Id | None = None
     review_id: Id
     observation_id: Id
     obligation_event_id: Id
@@ -731,7 +732,12 @@ class OutgoingFundingResolution(Input):
     evidence: str = Field(min_length=1)
 
 
+class OutgoingFundingBatch(Input):
+    withdrawals: list[OutgoingFundingResolution] = Field(min_length=1, max_length=100)
+
+
 CONTRACTS["resolve_outgoing_funding_source"] = OutgoingFundingResolution
+CONTRACTS["resolve_outgoing_funding_batch"] = OutgoingFundingBatch
 
 
 from app.portfolio.operations import OperationVerificationInput  # noqa: E402

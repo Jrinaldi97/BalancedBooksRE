@@ -23,7 +23,10 @@ import binascii
 import ipaddress
 import json
 import logging
+import math
+import os
 import socket
+from time import monotonic
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit, urlunsplit
@@ -35,7 +38,24 @@ from app.services.ofx_import import import_transactions
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT = 30.0
+# How long one request to the bridge may take (#1002). A bridge that refreshes
+# several institutions on one request takes 20–45 s on a slow night, so 30 s
+# timed out syncs through no fault of the user's side; the default is 120 s,
+# and SLOWBOOKS_SIMPLEFIN_TIMEOUT in the .env raises or lowers it (a number of
+# seconds, floor 10).
+DEFAULT_TIMEOUT = 120.0
+TIMEOUT_SETTING = "SLOWBOOKS_SIMPLEFIN_TIMEOUT"
+
+
+def request_timeout() -> float:
+    """The bridge timeout in seconds: the .env setting when it is a number, else the default."""
+    raw = (os.environ.get(TIMEOUT_SETTING) or "").strip()
+    try:
+        seconds = float(raw)
+        return max(10.0, seconds) if math.isfinite(seconds) else DEFAULT_TIMEOUT
+    except ValueError:
+        return DEFAULT_TIMEOUT
+
 
 # First sync reaches back this far; later syncs re-request a small overlap
 # window before the last sync (dedup makes the overlap harmless). The
@@ -100,15 +120,39 @@ def _pin(url: str, address: str) -> tuple[str, dict]:
     return pinned, {"host": host, "sni": host}
 
 
-def send(request: dict, timeout: float = DEFAULT_TIMEOUT) -> httpx.Response:
+def timeout_sentence(exc: Exception, elapsed: float, timeout: float) -> str:
+    """What a timed-out request says (#1002, #1017). A read that took the
+    whole configured wait is a slow bridge, and raising the setting helps; a
+    connect that was never answered (Windows gives up after its SYN retries,
+    about 21 s, long before the setting) is a bridge that can't be reached,
+    and the sentence says what was measured, not a wait that never happened."""
+    # a read timeout fires only once the configured wait has run; a connect
+    # timeout is the network giving up, whenever that was
+    if isinstance(exc, httpx.ConnectTimeout):
+        return (
+            "Could not reach the SimpleFIN bridge: the connection was not "
+            f"answered after {elapsed:.0f} seconds. Check the bridge address "
+            "and your network, then try again."
+        )
+    return (
+        f"SimpleFIN did not answer within {timeout:g} seconds. A bridge that "
+        "refreshes several banks can be slow; try again, or raise "
+        f"{TIMEOUT_SETTING} in the .env to wait longer."
+    )
+
+
+def send(request: dict, timeout: float | None = None) -> httpx.Response:
     """Execute a request dict from a build_* function (hardened defaults).
 
     Every outbound URL passes the SSRF guard first — this is the single
     network chokepoint for the SimpleFIN feature — and the connection is
     made to the address the guard approved (host header and SNI keep the
     hostname), then the peer address is checked once more after connect."""
+    if timeout is None:
+        timeout = request_timeout()
     address = _assert_public_https(request["url"])
     pinned_url, names = _pin(request["url"], address)
+    started = monotonic()
     try:
         # follow_redirects=False is load-bearing: a redirect would resolve a
         # new hostname and step straight around the pin. Keep it off.
@@ -132,8 +176,11 @@ def send(request: dict, timeout: float = DEFAULT_TIMEOUT) -> httpx.Response:
             # Windows — the 2.9.3 gate found exactly that). A stream that
             # cannot report its peer is not evidence either way.
             peer = _peer_address(response)
-    except httpx.RequestError:
-        logger.warning("SimpleFIN bridge request failed", exc_info=True)
+    except httpx.TimeoutException as exc:
+        logger.warning("SimpleFIN bridge request timed out (%s)", type(exc).__name__)
+        raise SimpleFINError(timeout_sentence(exc, monotonic() - started, timeout))
+    except httpx.RequestError as exc:
+        logger.warning("SimpleFIN bridge request failed (%s)", type(exc).__name__)
         raise SimpleFINError("Could not reach the SimpleFIN bridge right now")
     if peer and not ipaddress.ip_address(peer).is_global:
         raise SimpleFINError(

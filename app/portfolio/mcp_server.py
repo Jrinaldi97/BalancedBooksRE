@@ -532,6 +532,12 @@ async def outgoing_funding_assessment(observation_id: int) -> dict:
 
 
 @mcp.tool(annotations=READ)
+async def outgoing_funding_assessments(ids: list[int]) -> dict:
+    """Assess up to 100 posted withdrawals on one bank account for an atomic funding batch."""
+    return await request("GET", "/outgoing-funding-assessments", params={"ids": ids})
+
+
+@mcp.tool(annotations=READ)
 async def owner_custody_state(item_id: int) -> dict:
     """Read a specific owner's remaining custody obligation and current payout digest."""
     return await request("GET", f"/owner-custody-state/{item_id}")
@@ -593,15 +599,17 @@ async def invoice_state(code: str) -> dict:
 @mcp.tool(annotations=READ)
 async def receipt_candidates(
     account_id: int,
-    start: str,
-    end: str,
     amount_cents: int,
+    start: str | None = None,
+    end: str | None = None,
     provider_id: str | None = None,
     order_id: str | None = None,
     alias: str | None = None,
     limit: int = 50,
+    after_id: int = 0,
+    expected_book_digest: str | None = None,
 ) -> dict:
-    """Compare receipt facts with issuer observations, showing confirmed identifiers, conflicts and open questions."""
+    """Compare receipt identifiers and signed amounts. Omit dates for all history. Continue using next_after_id and book_digest."""
     return await request(
         "GET",
         "/receipt-candidates",

@@ -60,6 +60,8 @@ sample transactions to play with. Disconnect afterward to clear it.
 
 ## Notes & troubleshooting
 
+- A message that the bridge did not answer within 120 seconds indicates a slow response. The default wait is 120 seconds. For a longer wait set `SLOWBOOKS_SIMPLEFIN_TIMEOUT=240` in the app's environment settings and restart. If the connection was not answered, check the bridge address and network connection. The elapsed time in that message measures the connection attempt.
+
 - **Setup tokens are single-use.** If a connect attempt fails and the
   token was consumed, generate a fresh token on the bridge site.
 - **Desktop installs work fully** — the sync is outbound HTTPS polling;

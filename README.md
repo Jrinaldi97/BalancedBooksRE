@@ -1,6 +1,8 @@
 # BalancedBooksRE
 
-A customized Mac real-estate accounting fork. See [BalancedBooksRE usage and accounting controls](BALANCEDBOOKSRE.md). Current fork release: **0.6.0**. See [workflow changes and upstream comparison](docs/bbre-0.6.0-engineering.md). Original upstream documentation follows.
+BalancedBooksRE **0.9.0** is a Mac accounting application for real-estate portfolios, with native commands for ChatGPT Desktop and Codex. The guide covers accounting controls, fund attribution, and the comparison with SlowBooks Pro. [BalancedBooksRE guide](BALANCEDBOOKSRE.md) · [0.9.0 release details](BALANCEDBOOKSRE.md#source-attribution-and-native-banking-in-090)
+
+The original upstream documentation follows.
 
 # Slowbooks Pro 2026
 

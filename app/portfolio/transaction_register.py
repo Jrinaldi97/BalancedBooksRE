@@ -398,38 +398,66 @@ def receipt_candidates(
     order_id=None,
     alias=None,
     limit=50,
+    after_id=0,
+    expected_book_digest=None,
 ):
-    from app.portfolio.review_workspace import current_records
-
-    if end < start or (end - start).days > 366:
-        fail("candidate_dates", "Choose an ordered search interval of up to one year")
+    if start and end and end < start:
+        fail("candidate_dates", "Choose an ordered search interval")
+    if not 1 <= limit <= 200 or after_id < 0:
+        fail("export_bounds", "Choose a nonnegative cursor and 1 to 200 candidates")
     read_snapshot(db)
-    rows = (
-        db.query(m.BankObservation)
-        .filter(
-            m.BankObservation.account_id == account_id,
-            m.BankObservation.date.between(start, end),
-            m.BankObservation.amount_cents == amount_cents,
-            m.BankObservation.status != "duplicate",
+    stamp = book_digest(db)
+    if (after_id or expected_book_digest is not None) and stamp != expected_book_digest:
+        fail("stale_export", "Restart the receipt search at the current book revision")
+    query = db.query(m.BankObservation).filter(
+        m.BankObservation.account_id == account_id,
+        m.BankObservation.amount_cents == amount_cents,
+        m.BankObservation.status != "duplicate",
+    )
+    if start:
+        query = query.filter(m.BankObservation.date >= start)
+    if end:
+        query = query.filter(m.BankObservation.date <= end)
+    if after_id:
+        cursor = query.filter(m.BankObservation.id == after_id).one_or_none()
+        if not cursor:
+            fail(
+                "candidate_cursor",
+                "Choose a continuation from this account, amount and interval",
+            )
+        query = query.filter(
+            or_(
+                m.BankObservation.date > cursor.date,
+                (m.BankObservation.date == cursor.date)
+                & (m.BankObservation.id > cursor.id),
+            )
         )
-        .order_by(m.BankObservation.date, m.BankObservation.id)
+    rows = (
+        query.order_by(m.BankObservation.date, m.BankObservation.id)
         .limit(limit + 1)
         .all()
     )
-    results = []
-    for obs in rows[:limit]:
-        notes = [
-            r.payload
-            for r in current_records(db)
-            .filter_by(kind="research", observation_id=obs.id)
-            .order_by(Record.id)
-        ]
-        src = obs.source or {}
-        issuer_alias = (
-            db.get(m.CardAlias, src["card_alias_id"])
-            if src.get("card_alias_id")
-            else None
+    page = rows[:limit]
+    notes_by_id = defaultdict(list)
+    for record in (
+        current_records(db)
+        .filter(
+            Record.kind == "research",
+            Record.observation_id.in_([row.id for row in page]),
         )
+        .order_by(Record.id)
+    ):
+        notes_by_id[record.observation_id].append(record.payload)
+    alias_ids = {(row.source or {}).get("card_alias_id") for row in page} - {None}
+    aliases = {
+        row.id: row
+        for row in db.query(m.CardAlias).filter(m.CardAlias.id.in_(alias_ids))
+    }
+    results = []
+    for obs in page:
+        notes = notes_by_id[obs.id]
+        src = obs.source or {}
+        issuer_alias = aliases.get(src.get("card_alias_id"))
         facts = {
             "provider_id": (
                 {src["provider_transaction_id"]}
@@ -479,8 +507,9 @@ def receipt_candidates(
     return {
         "candidates": results,
         "truncated": len(rows) > limit,
-        "basis": "Account, signed amount and date interval select candidates. Confirm the source before creating a relationship.",
-        "book_digest": book_digest(db),
+        "next_after_id": page[-1].id if len(rows) > limit else None,
+        "basis": "Account, signed amount and any supplied dates select candidates. Confirm the source before creating a relationship.",
+        "book_digest": stamp,
     }
 
 

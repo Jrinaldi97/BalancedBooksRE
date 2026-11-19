@@ -28,73 +28,196 @@ def _obligation_vector(rows, predicate):
     return {key: amount for key, amount in totals.items() if amount}
 
 
-def outgoing_funding_assessment(db, observation_id):
-    from app.portfolio.service import get, scope, values, digest, fail
-    from app.portfolio.observation_state import observation_state
-    from app.portfolio.reports import ledger, read_snapshot
-    from app.models.transactions import TransactionLine
+def _funding_inputs(db, ids):
+    from app.portfolio.service import scope, values, digest, fail
+    from app.portfolio.observation_state import observation_states
+    from app.portfolio.ledger_snapshot import LedgerSnapshot
+    from app.portfolio.review_workspace import original_review_code
 
-    read_snapshot(db)
-    obs = get(db, m.BankObservation, observation_id)
-    bank = scope(db, obs.account_id)
-    if bank.role != "bank" or obs.amount_cents >= 0 or obs.status != "posted":
-        fail("funding_scope", "Select a posted bank withdrawal")
-    state = observation_state(db, obs.id)
+    states = observation_states(db, ids)
+    account_ids = {state["observation"]["account_id"] for state in states}
+    if len(account_ids) != 1:
+        fail("funding_scope", "Select withdrawals from a single bank account")
+    bank = scope(db, account_ids.pop())
+    if bank.role != "bank" or any(
+        s["observation"]["amount_cents"] >= 0 or s["observation"]["status"] != "posted"
+        for s in states
+    ):
+        fail("funding_scope", "Select posted bank withdrawals")
     funds = (
-        db.query(m.Fund)
-        .filter_by(holder_entity_id=bank.entity_id)
+        db.query(m.Fund, m.Party)
+        .join(m.Party, m.Party.id == m.Fund.beneficiary_id)
+        .filter(m.Fund.holder_entity_id == bank.entity_id)
         .order_by(m.Fund.id)
         .all()
     )
-    parties = {
-        f.beneficiary_id: values(get(db, m.Party, f.beneficiary_id)) for f in funds
-    }
-    rows = {
-        basis: ledger(db, date.max, account_id=obs.account_id, basis=basis)
-        for basis in BASES
-    }
-    account_lines = db.query(TransactionLine.id).filter(
-        TransactionLine.account_id == obs.account_id
+    own = []
+    unresolved = []
+    for fund, party in funds:
+        holder_owned = party.entity_id == bank.entity_id
+        if (
+            fund.purpose in {"general", "reserve"}
+            and holder_owned
+            and party.kind != "allocation_pending"
+            and fund.restriction == "unrestricted"
+        ):
+            own.append(fund.id)
+        if fund.purpose != "unresolved" or fund.property_id or fund.unit_id:
+            continue
+        # The legacy pooled placeholder has its own non-owner party and an
+        # allocation-status description. Other free-text restrictions remain binding.
+        pending_party = party.kind == "allocation_pending" and party.entity_id is None
+        if ((holder_owned or pending_party) and fund.restriction == "unrestricted") or (
+            pending_party
+            and fund.restriction.strip().casefold()
+            in {"allocation pending", "client and operating allocation pending"}
+        ):
+            unresolved.append(fund.id)
+    packet = LedgerSnapshot(db, date.max, account_id=bank.account_id)
+    account_digest = digest(
+        {
+            "account": values(bank),
+            "funds": [(values(f), values(p)) for f, p in funds],
+            "lines": packet.rows,
+            "allocations": packet.allocations,
+            "classifications": packet.classifications,
+            "basis_adjustments": packet.adjustments,
+        }
     )
-    allocations = [
-        values(a)
-        for a in db.query(m.LineAllocation)
-        .filter(m.LineAllocation.line_id.in_(account_lines))
-        .order_by(m.LineAllocation.id)
-    ]
-    payload = {
-        "state_digest": state["state_digest"],
-        "account": values(bank),
-        "funds": [values(f) for f in funds],
-        "parties": parties,
-        "ledger": rows,
-        "allocations": allocations,
-    }
-    return {
-        "observation_id": obs.id,
-        "account_id": obs.account_id,
-        "entity_id": bank.entity_id,
-        "date": obs.date.isoformat(),
-        "amount_cents": -obs.amount_cents,
-        "state_digest": state["state_digest"],
-        "funding_digest": digest(payload),
-        "eligible_own_fund_ids": [
-            f.id
-            for f in funds
-            if f.purpose != "unresolved"
-            and f.restriction == "unrestricted"
-            and parties[f.beneficiary_id]["entity_id"] == bank.entity_id
-        ],
-        "scope": "This withdrawal only. Fund ownership and source evidence must be supplied; account balances alone do not prove financing.",
-    }
+    result = []
+    for state in states:
+        obs = state["observation"]
+        reviews = []
+        for row in state["reviews"]:
+            if row["status"] == "open" and row["code"] in {
+                "funding_source",
+                "software_limitation",
+            }:
+                review = db.get(m.ReviewItem, row["id"])
+                if original_review_code(db, review) == "funding_source":
+                    reviews.append(
+                        {
+                            "review_id": review.id,
+                            "review_code": review.code,
+                            "obligation_event_id": review.event_id,
+                        }
+                    )
+        result.append(
+            {
+                "observation_id": obs["id"],
+                "account_id": bank.account_id,
+                "entity_id": bank.entity_id,
+                "date": obs["date"],
+                "amount_cents": -obs["amount_cents"],
+                "state_digest": state["state_digest"],
+                "funding_digest": digest(
+                    [account_digest, state["state_digest"], reviews]
+                ),
+                "eligible_own_fund_ids": own,
+                "unresolved_source_fund_ids": unresolved,
+                "funding_reviews": reviews,
+                "cash_lineage": state.get("cash_lineage"),
+                "scope": "Supply evidence for this withdrawal's actual ownership. Eligibility alone does not establish financing.",
+            }
+        )
+    return states, result
+
+
+def outgoing_funding_assessments(db, ids):
+    return {"assessments": _funding_inputs(db, ids)[1]}
+
+
+def outgoing_funding_assessment(db, observation_id):
+    return _funding_inputs(db, [observation_id])[1][0]
 
 
 def resolve_outgoing_funding_source(db, data, actor):
+    return _resolve_withdrawals(db, [data], actor, single=True)
+
+
+def resolve_outgoing_funding_batch(db, data, actor):
+    return _resolve_withdrawals(db, data.withdrawals, actor, single=False)
+
+
+def _resolve_withdrawals(db, withdrawals, actor, *, single):
+    from app.portfolio.service import fail
+    from app.portfolio.ledger_snapshot import LedgerSnapshot
+    from app.portfolio.dated_balances import outgoing_fund_availability
+    from app.portfolio.observation_state import observation_states
+
+    ids = [w.observation_id for w in withdrawals]
+    states, assessments = _funding_inputs(db, ids)
+    touched_events = set()
+    days = defaultdict(set)
+    results = []
+    for w, state, assessment in zip(withdrawals, states, assessments):
+        if touched_events.intersection(state["event_ids"]):
+            fail(
+                "cash_lineage",
+                "Withdrawals in a batch must have independent correction families",
+            )
+        touched_events.update(state["event_ids"])
+        results.append(_attribute_withdrawal(db, w, actor, state, assessment))
+        for component in w.components:
+            if component.own_fund_id:
+                days[component.own_fund_id].add(assessment["date"])
+
+    db.flush()
+    packet = LedgerSnapshot(db, date.max, account_id=assessments[0]["account_id"])
+    availability = outgoing_fund_availability(packet, days)
+    for before, after, result in zip(states, observation_states(db, ids), results):
+        obs = before["observation"]
+        expected = {c["fund_id"]: c["amount_cents"] for c in result["effective_funds"]}
+        # A reciprocal intercompany family legitimately contains a second bank.
+        # Verify this observation's exact immutable physical source on both bases.
+        projections = packet.project_bases(
+            date.fromisoformat(obs["date"]), event_ids=[obs["event_id"]]
+        )
+        for rows in projections.values():
+            totals = defaultdict(int)
+            if not rows or any(
+                row["line_id"] != result["physical_line_id"] for row in rows
+            ):
+                fail(
+                    "funding_invariant",
+                    "The original bank movement no longer has one physical source",
+                )
+            for row in rows:
+                totals[row.get("fund_id")] += row["debit_cents"] - row["credit_cents"]
+            if dict(totals) != expected:
+                fail(
+                    "funding_invariant",
+                    "Effective cash funds differ from the proposed attribution",
+                )
+        if (
+            after["bank_movements"] != before["bank_movements"]
+            or after["suspense_residuals"] != before["suspense_residuals"]
+        ):
+            fail(
+                "funding_invariant",
+                "Funding attribution changed bank movements or classification",
+            )
+    if single:
+        return {**results[0], "availability": availability}
+    return {
+        "withdrawals": results,
+        "event_ids": [r["event_id"] for r in results],
+        "resolved_review_ids": [i for r in results for i in r["resolved_review_ids"]],
+        "open_funding_review_ids": [
+            i for r in results for i in r["open_funding_review_ids"]
+        ],
+        "remaining_cents": sum(r["remaining_cents"] for r in results),
+        "availability": availability,
+        "atomic": True,
+        "bank_cash_delta_cents": 0,
+        "financial_entries_added": False,
+    }
+
+
+def _attribute_withdrawal(db, data, actor, state, assessment):
     from app.portfolio.service import get, scope, fail, check_date
-    from app.portfolio.observation_state import observation_state
     from app.portfolio.reports import ledger
 
-    assessment = outgoing_funding_assessment(db, data.observation_id)
     if assessment["state_digest"] != data.expected_state_digest:
         fail("stale_state", "Refresh this withdrawal before resolving its source")
     if assessment["funding_digest"] != data.expected_funding_digest:
@@ -106,11 +229,10 @@ def resolve_outgoing_funding_source(db, data, actor):
     bank = scope(db, obs.account_id)
     review = get(db, m.ReviewItem, data.review_id)
     event = get(db, m.Event, data.obligation_event_id)
-    state = observation_state(db, obs.id)
     source = event.source or {}
     if (
         review.status != "open"
-        or review.code != "funding_source"
+        or review.id not in {r["review_id"] for r in assessment["funding_reviews"]}
         or review.observation_id != obs.id
         or review.event_id != event.id
         or review.entity_id != bank.entity_id
@@ -121,10 +243,37 @@ def resolve_outgoing_funding_source(db, data, actor):
             "funding_purpose",
             "Establish the complete obligation before resolving its source",
         )
-    families = {
-        basis: ledger(db, date.max, event_ids=state["event_ids"], basis=basis)
-        for basis in BASES
-    }
+    if not data.evidence.strip() or any(
+        not c.evidence.strip() for c in data.components
+    ):
+        fail(
+            "funding_evidence",
+            "Describe the source evidence for the withdrawal and each component",
+        )
+    if data.evidence_policy_id:
+        policy = get(db, m.ReportingPolicy, data.evidence_policy_id)
+        if not isinstance(policy.assumptions, dict):
+            fail("funding_evidence", "The policy scope must be a structured record")
+        listed = policy.assumptions.get("observation_ids")
+        if (
+            policy.entity_id != bank.entity_id
+            or policy.start > obs.date
+            or (policy.end and policy.end < obs.date)
+            or (
+                listed is not None
+                and (not isinstance(listed, list) or obs.id not in listed)
+            )
+            or db.query(m.ReportingPolicy.id).filter_by(supersedes_id=policy.id).first()
+        ):
+            fail(
+                "funding_evidence",
+                "Use a current policy for this entity, date and withdrawal",
+            )
+    from app.portfolio.ledger_snapshot import LedgerSnapshot
+
+    families = LedgerSnapshot(db, date.max, event_ids=state["event_ids"]).project_bases(
+        date.max
+    )
     obligations = {
         basis: [row for row in rows if row["event_id"] == event.id]
         for basis, rows in families.items()
@@ -245,7 +394,19 @@ def resolve_outgoing_funding_source(db, data, actor):
         r for r in family if r["role"] == "bank" and r["account_id"] == obs.account_id
     ]
     if (
-        not cash
+        (
+            event.kind == "posted_party_balance"
+            and not state["cash_lineage"]["supported"]
+        )
+        or len(
+            [
+                s
+                for s in state["source_observations"]
+                if s["account_id"] == obs.account_id and s["event_id"] == obs.event_id
+            ]
+        )
+        != 1
+        or not cash
         or len({r["line_id"] for r in cash}) != 1
         or any(
             r["date"] != obs.date.isoformat()
@@ -299,24 +460,22 @@ def resolve_outgoing_funding_source(db, data, actor):
             if component.source_fund_id
             else None
         )
-        if original_fund and (
-            original_fund.holder_entity_id != bank.entity_id
-            or original_fund.restriction != "unrestricted"
-            or (
-                original_fund.purpose != "unresolved"
-                and original_fund.id not in assessment["eligible_own_fund_ids"]
-            )
+        if original_fund and original_fund.id not in (
+            assessment["eligible_own_fund_ids"]
+            + assessment["unresolved_source_fund_ids"]
         ):
             fail(
                 "client_financing",
                 "Client or restricted funding cannot be certified as company financing",
             )
+        target = None
         if component.own_fund_id:
             if component.own_fund_id not in assessment["eligible_own_fund_ids"]:
                 fail(
                     "funding_owner",
                     "The source must be a real unrestricted fund owned by the paying entity",
                 )
+            target = get(db, m.Fund, component.own_fund_id)
             if (
                 original_fund
                 and original_fund.purpose != "unresolved"
@@ -347,6 +506,14 @@ def resolve_outgoing_funding_source(db, data, actor):
                 continue
             amount = min(remaining, row["remaining"])
             if amount:
+                if target and any(
+                    getattr(target, dim) and getattr(target, dim) != row.get(dim)
+                    for dim in ("property_id", "unit_id")
+                ):
+                    fail(
+                        "funding_scope",
+                        "The target fund is limited to another property or unit",
+                    )
                 wanted.append(
                     {
                         "amount_cents": -amount,
@@ -376,7 +543,8 @@ def resolve_outgoing_funding_source(db, data, actor):
     # Bind the attestation to the original purpose and source; it contains no journal.
     key = db.info.get("portfolio_command_key", uuid.uuid4().hex)
     attestation = m.Event(
-        code="RE-" + uuid.uuid5(uuid.NAMESPACE_URL, key + ":funding").hex[:16],
+        code="RE-"
+        + uuid.uuid5(uuid.NAMESPACE_URL, key + f":funding:{obs.id}").hex[:16],
         kind="outgoing_funding_attestation",
         date=obs.date,
         description="Withdrawal funding-source evidence",
@@ -385,6 +553,9 @@ def resolve_outgoing_funding_source(db, data, actor):
         corrects_id=obs.event_id,
         source={
             "observation_id": obs.id,
+            "review_id": review.id,
+            "physical_line_id": line_id,
+            "evidence_policy_id": data.evidence_policy_id,
             "obligation_event_id": event.id,
             "party_id": data.party_id,
             "counterparty_entity_id": data.counterparty_entity_id,
@@ -408,63 +579,6 @@ def resolve_outgoing_funding_source(db, data, actor):
             )
         )
         db.flush()
-    # Check every transaction/allocation boundary, not merely the final balance.
-    from app.models.transactions import Transaction, TransactionLine
-
-    days = {obs.date} | {
-        d
-        for (d,) in db.query(Transaction.date)
-        .join(TransactionLine, TransactionLine.transaction_id == Transaction.id)
-        .filter(
-            TransactionLine.account_id == obs.account_id, Transaction.date >= obs.date
-        )
-        .distinct()
-    }
-    account_line_ids = db.query(TransactionLine.id).filter(
-        TransactionLine.account_id == obs.account_id
-    )
-    days |= {
-        d
-        for (d,) in db.query(m.LineAllocation.date)
-        .filter(
-            m.LineAllocation.line_id.in_(account_line_ids),
-            m.LineAllocation.date >= obs.date,
-        )
-        .distinct()
-    }
-    days |= {
-        adjustment.date
-        for adjustment in db.query(m.BasisAdjustment).filter(
-            m.BasisAdjustment.entity_id == bank.entity_id,
-            m.BasisAdjustment.date >= obs.date,
-        )
-        if any(row["account_id"] == obs.account_id for row in adjustment.lines)
-    }
-    own_ids = {c.own_fund_id for c in data.components if c.own_fund_id}
-    for day in sorted(days):
-        for basis in BASES:
-            totals = defaultdict(int)
-            for row in ledger(db, day, account_id=obs.account_id, basis=basis):
-                if row["virtual"]:
-                    fail(
-                        "funding_basis",
-                        "Source bank movements must agree on both bases; review cash basis adjustments first",
-                    )
-                totals[row.get("fund_id")] += row["debit_cents"] - row["credit_cents"]
-            if any(totals[ident] < 0 for ident in own_ids):
-                fail(
-                    "funding_availability",
-                    "The identified company fund lacks supported availability at a relevant date",
-                )
-    after = observation_state(db, obs.id)
-    if (
-        after["bank_movements"] != state["bank_movements"]
-        or after["suspense_residuals"] != state["suspense_residuals"]
-    ):
-        fail(
-            "funding_invariant",
-            "Funding attribution changed cash movements or purpose classification",
-        )
     review.resolution = json.dumps(
         {
             "reason": "identified_outgoing_source",
@@ -479,7 +593,16 @@ def resolve_outgoing_funding_source(db, data, actor):
     if not unsupported:
         review.status = "resolved"
         review.resolved_event_id = attestation.id
+    effective = defaultdict(int)
+    for part in wanted:
+        effective[part["fund_id"]] += part["amount_cents"]
     return {
+        "physical_line_id": line_id,
+        "effective_funds": [
+            {"fund_id": fid, "amount_cents": amount}
+            for fid, amount in effective.items()
+        ],
+        "obligation_event_id": event.id,
         "event_id": attestation.id,
         "observation_id": obs.id,
         "resolved_review_ids": [review.id] if not unsupported else [],

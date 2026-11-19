@@ -162,7 +162,7 @@ reviews. Full and compact observation state and record reads expose the field.
 
 ## Transaction research and validation in 0.8.0
 
-The native contract release is `2026.11-review-workflows.8` and the database revision is `bb0008`. Open `context` for the company file and build identity. Request `command_schemas` for the named operations before preparing a change.
+The 0.8.0 native contract release was `2026.11-review-workflows.8` and the database revision is `bb0008`. Open `context` for the company file and build identity. Request `command_schemas` for the named operations before preparing a change.
 
 | Task | Native workflow |
 |---|---|
@@ -193,3 +193,32 @@ When a restricted client cannot open loopback HTTP, use the registered BalancedB
 The prior selective port reviewed SlowBooks through `197271ca`. This release compares the later changes through `7cdb73e2`. It incorporates the SQLite write-lock fix for simultaneous payments from `e6c3a1fd` and adapts the off-event-loop authentication and SQLite pool changes from `1123e387` to BBRE's native bearer-token path. Concurrent native launches recheck the authenticated company listener if another process acquires the port.
 
 Upstream Books Check inspired the dated native movement reconciliation. BBRE uses its own observation, journal and basis models. The upstream feed deduplication and classification suggestions informed explicit receipt comparison. Repeated equal bank charges remain separately inspectable. The newer upstream QuickBooks conversion, payroll, sales and invoice-to-purchase-order screens target different workflows from portfolio bookkeeping through MCP.
+
+## Source attribution and native banking in 0.9.0
+
+The 0.9.0 contract is `2026.11-fund-attribution.9` on schema `bb0008`. Native `context` identifies the company file, build commit and running executable. Installing this release requires no database migration.
+
+### Confirming who funded a posted withdrawal
+
+1. Call `outgoing_funding_assessments` with up to 100 observation IDs from one bank account. Each result identifies the source line, its effective fund components, the linked review and obligation, eligible own funds, and the state and funding digests. For a single withdrawal, `outgoing_funding_assessment` returns the same information.
+2. Read `command_schemas` for `resolve_outgoing_funding_source` or `resolve_outgoing_funding_batch`. Supply transaction-specific evidence, the actual obligor and item, both fresh digests and the amount of each source component. An optional `evidence_policy_id` links a current, dated entity policy. When that policy lists observation IDs, the selected observation must be included.
+3. Preview the batch using `propose`. Review the fund amounts, withdrawal-day floors, minimum later closing balances and review transitions. Commit the approved proposal and recover the saved result using its stable retry key. `transaction_family` shows the original journal, allocation revisions and effective lines for each reporting basis.
+
+A software-limitation review qualifies when its recorded original type was `funding_source` and it still refers to this observation and obligation. The source can be an explicitly unresolved allocation placeholder. Named beneficiaries, escrow, tenant funds and other substantive restrictions retain their protections. Each supported replacement takes effect on the physical line's original date, subject to period locks. An unsupported remainder keeps the linked review open.
+
+Availability is checked across all proposed withdrawals together. On withdrawal dates the lower bound charges that day's debits before giving credit for incoming funds. Later dated allocation changes enter the historical balance when effective. Receipts report the lowest subsequent closing balance and the withdrawal-day figures in cents. A failed member rolls back the entire batch.
+
+### Changes drawn from SlowBooks Pro
+
+The comparison covers upstream main through [`9bd0dd8d`](https://github.com/VonHoltenCodes/SlowBooks-Pro-2026/commit/9bd0dd8de784deffcf1730581ac2839eeb436c8e).
+
+| Upstream change | Application to BBRE |
+|---|---|
+| Wider bank matching windows | Statement matching supports 30 days, 90 days, one year or all dates. The native `receipt_candidates` tool accepts either date bound or all history, with book-digest pagination ordered by date and observation ID. Repeated equal amounts remain individually visible. [Upstream change](https://github.com/VonHoltenCodes/SlowBooks-Pro-2026/commit/85cf8a305a51600572bfb1c1ffc473bda25c39de) |
+| Selected bank-feed rows and partial payments | The portfolio already has typed partial classifications, evidenced applications and atomic batches. The funding batch extends these controls to multiple withdrawals on a shared account with cumulative availability checks. [Selected rows](https://github.com/VonHoltenCodes/SlowBooks-Pro-2026/commit/abba5aaa) · [Partial payments](https://github.com/VonHoltenCodes/SlowBooks-Pro-2026/commit/f5facf3c) |
+| SimpleFIN connection reliability | The feed allows a configurable response timeout, defaults to 120 seconds, and distinguishes an unanswered connection from a slow response. [Timeout setting](https://github.com/VonHoltenCodes/SlowBooks-Pro-2026/commit/025226c4) · [Connection diagnostics](https://github.com/VonHoltenCodes/SlowBooks-Pro-2026/commit/bcfc62d4) |
+| Missing company files | Native startup can recover a registered last selection if the selection marker is missing. An ambiguous selection or missing established file produces an error before an empty book can be created in its place. [Upstream change](https://github.com/VonHoltenCodes/SlowBooks-Pro-2026/commit/d1bd03d9976d47df8cafbbc9d945d09b43b5427e) |
+
+A second MCP or desktop launch reads an existing company identity without taking SQLite's writer lock. Creating the first identity still takes the lock and rechecks the row. Receipt research and issuer alias reads are fetched once per result page.
+
+The fork retains its native accrual and modified-cash reports, property and fund dimensions, transaction research and document links. Upstream's construction forms, payroll screens, printed form layout and on-screen field hints address workflows outside this release.

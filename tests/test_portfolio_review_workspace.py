@@ -370,3 +370,77 @@ def test_routed_validation_requires_all_three_legs_and_each_basis(portfolio):
             assert review.status == "open"
         result = run(db, "validate_existing_correction", **data)
         assert result["new_financial_events"] == 0 and review.status == "resolved"
+
+
+def test_receipt_search_spans_history_and_pages_repeated_amounts(portfolio):
+    db, entity_id, _, _, _ = portfolio
+    bank = account(
+        db, entity_id, "history", "asset", "bank", coverage_start="2024-01-01"
+    )
+    ids = bank_rows(
+        db,
+        bank,
+        [
+            dict(date="2026-05-01", amount_cents=-1250, description="Second year"),
+            dict(date="2024-01-01", amount_cents=-1250, description="First payment"),
+            dict(date="2024-01-01", amount_cents=-1250, description="Second payment"),
+        ],
+    )
+    first = receipt_candidates(db, bank, None, None, -1250, limit=1)
+
+    def follow(page):
+        return receipt_candidates(
+            db,
+            bank,
+            None,
+            None,
+            -1250,
+            limit=1,
+            after_id=page["next_after_id"],
+            expected_book_digest=page["book_digest"],
+        )
+
+    second = follow(first)
+    last = follow(second)
+    assert [p["candidates"][0]["observation"]["id"] for p in (first, second, last)] == [
+        ids[1],
+        ids[2],
+        ids[0],
+    ]
+    assert last["next_after_id"] is None and not last["truncated"]
+    assert all(
+        p["candidates"][0]["assessment"] == "needs_more_evidence"
+        for p in (first, second, last)
+    )
+    assert (
+        len(
+            receipt_candidates(db, bank, date(2024, 1, 1), date(2026, 6, 1), -1250)[
+                "candidates"
+            ]
+        )
+        == 3
+    )
+    assert (
+        len(receipt_candidates(db, bank, date(2025, 1, 1), None, -1250)["candidates"])
+        == 1
+    )
+    with pytest.raises(Problem) as exc:
+        receipt_candidates(
+            db,
+            bank,
+            None,
+            None,
+            -900,
+            after_id=first["next_after_id"],
+            expected_book_digest=first["book_digest"],
+        )
+    assert exc.value.code == "candidate_cursor"
+    bank_rows(
+        db,
+        bank,
+        [dict(date="2024-01-01", amount_cents=-1250, description="Another")],
+        name="other.csv",
+    )
+    with pytest.raises(Problem) as exc:
+        follow(first)
+    assert exc.value.code == "stale_export"

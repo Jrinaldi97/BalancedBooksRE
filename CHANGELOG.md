@@ -5,6 +5,12 @@ Notable changes between releases. Format roughly follows
 used during development is captured here so the README can stay focused
 on what the software does, not on what sprint shipped what.
 
+## BalancedBooksRE 0.9.0 — November 19, 2026
+
+Posted withdrawals can use a verified own fund after their original obligation was classified and their funding review was marked as a software limitation. A single proposal can assess and resolve up to 100 withdrawals on one bank account, accounting for the full group's cash needs. Each receipt identifies the original bank line, effective funds, evidence and linked review. Both reporting bases are checked.
+
+Bank and receipt matching can search all dates. Native receipt search has stable continuation pages. SimpleFIN distinguishes connection failures from a slow response. Native startup recovers a registered company selection and reads an existing identity during a concurrent database write. The release uses schema `bb0008`. See [the native workflow and upstream comparison](BALANCEDBOOKSRE.md#source-attribution-and-native-banking-in-090).
+
 ## BalancedBooksRE 0.8.0 — November 17, 2026
 
 Add source-verified card journal linkage, separate basis declarations, three-leg receipt validation, auditable review retyping and transaction-level Excel exports. Add versioned research, partial component classification, evidenced settlement links, processor batch reconciliation and account/site history. The native agent can reconcile observed bank or issuer movements to the ledger, inspect discrepancies and recover exports without an HTTP connection. Schema bb0008 adds the indexed workpaper table. SQLite payment concurrency and authentication under load include selected upstream fixes. See the 0.8.0 guide in BALANCEDBOOKSRE.md.

@@ -294,6 +294,10 @@ _INTENTIONAL_BACKEND_ONLY: set[tuple[str, str]] = {
     ("GET", "/api/portfolio/requests/{key:path}"),
     ("GET", "/api/portfolio/reconciliations/{ident}/revision-state"),
     ("GET", "/api/portfolio/outgoing-funding-assessment"),
+    (
+        "GET",
+        "/api/portfolio/outgoing-funding-assessments",
+    ),  # Native MCP batch assessment
     ("GET", "/api/portfolio/reviews/{ident}/shortage-assessment"),
     ("GET", "/api/portfolio/ownership-as-of"),
     ("POST", "/api/portfolio/proposals"),

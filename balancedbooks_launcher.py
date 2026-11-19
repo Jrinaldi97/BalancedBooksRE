@@ -19,7 +19,13 @@ import time
 def company_paths(data_dir, filename=None):
     """Keep every company's database and AI credential separate."""
     if filename is None or filename == "portfolio.db":
-        return data_dir / "portfolio.db", data_dir / "ai-connection.token", 3188
+        database = data_dir / "portfolio.db"
+        credential = data_dir / "ai-connection.token"
+        if database.is_symlink() or (credential.exists() and not database.is_file()):
+            raise ValueError(
+                "The original company file is missing or is a symbolic link"
+            )
+        return database, credential, 3188
     if not re.fullmatch(r"[A-Za-z0-9_-]+\.db", filename):
         raise ValueError("Invalid company filename")
     path = data_dir / "companies" / filename
@@ -31,11 +37,32 @@ def company_paths(data_dir, filename=None):
 
 def selected_company(data_dir):
     marker = data_dir / "active-company.json"
-    if not marker.exists():
-        return "portfolio.db"
-    filename = json.loads(marker.read_text())["file"]
-    company_paths(data_dir, filename)
-    return filename
+    if marker.exists():
+        filename = json.loads(marker.read_text())["file"]
+        company_paths(data_dir, filename)
+        return filename
+    # Older installations can have the picker registry but no native marker.
+    # Only an explicit selection identifies a named book. Never silently
+    # initialize an empty original company beside existing named books.
+    original, _, _ = company_paths(data_dir)
+    if original.is_file():
+        return original.name
+    registry = data_dir / "companies.json"
+    if registry.is_file():
+        saved = json.loads(registry.read_text(encoding="utf-8-sig"))
+        last = saved.get("last_opened")
+        registered = {entry["file"] for entry in saved.get("companies", [])}
+        if last and last in registered:
+            path, _, _ = company_paths(data_dir, last)
+            if path.is_file():
+                return last
+        if registered:
+            raise ValueError(
+                "Choose an existing registered company with --company-file"
+            )
+    if any((data_dir / "companies").glob("*.db")):
+        raise ValueError("Choose an existing company with --company-file")
+    return original.name
 
 
 def prepare(data_dir, filename=None):
@@ -133,7 +160,7 @@ def _prepare_locked(data_dir, filename):
         FORCE_HTTPS="false",
         APP_HOST="127.0.0.1",
         SLOWBOOKS_DESKTOP="1",
-        APP_VERSION="0.8.0",
+        APP_VERSION="0.9.0",
     )
     from dotenv import load_dotenv
 
@@ -163,6 +190,14 @@ def ensure_company_identity():
     from app.models.settings import Settings
     from app.services.auth import COMPANY_SESSION_SETTING
 
+    # A second desktop or MCP process normally only needs the existing identity.
+    # A concurrent import may own SQLite's writer slot for several seconds.
+    with SessionLocal() as reader:
+        existing = (
+            reader.query(Settings.value).filter_by(key=COMPANY_SESSION_SETTING).scalar()
+        )
+        if existing:
+            return existing
     with SessionLocal() as db:
         db.execute(text("BEGIN IMMEDIATE"))
         row = db.query(Settings).filter_by(key=COMPANY_SESSION_SETTING).first()

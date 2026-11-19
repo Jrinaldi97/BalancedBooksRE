@@ -64,3 +64,73 @@ def liability_capacity(db, account_id, start, matches):
         "history_digest": digest(history),
         "source_event_ids": sorted(events),
     }
+
+
+def outgoing_fund_availability(packet, withdrawal_days):
+    """Check historical closes and a withdrawal-day floor independent of bank ordering.
+
+    Each physical line enters on its posting date. Later replacements contribute
+    only the change in that line's fund balance on their effective date. A day's
+    negative changes bound the cash needed if every debit precedes every credit.
+    """
+    from app.portfolio.service import fail
+
+    if packet.adjustments:
+        fail(
+            "funding_basis",
+            "Review bank basis adjustments before certifying source cash",
+        )
+    changes = {fund: defaultdict(list) for fund in withdrawal_days}
+    for line in packet.rows:
+        posted = line["date"]
+        amounts = {line["fund_id"]: line["debit_cents"] - line["credit_cents"]}
+        by_day = {posted: amounts}
+        for day, _, components in packet.allocations.get(line["line_id"], ()):
+            amounts = defaultdict(int)
+            for component in components:
+                amounts[component.get("fund_id")] += component["amount_cents"]
+            by_day[max(posted, day.isoformat())] = amounts
+        previous = {}
+        for day, amounts in sorted(by_day.items()):
+            for fund in withdrawal_days.keys() & (amounts.keys() | previous.keys()):
+                delta = amounts.get(fund, 0) - previous.get(fund, 0)
+                if delta:
+                    changes[fund][day].append(delta)
+            previous = amounts
+
+    proofs = []
+    for fund, days in sorted(withdrawal_days.items()):
+        start = min(days)
+        floor_by_day = {}
+        closing_minimum = None
+        balance = 0
+        for day in sorted(changes[fund].keys() | days):
+            movements = changes[fund][day]
+            floor = balance + sum(value for value in movements if value < 0)
+            balance += sum(movements)
+            if day < start:
+                continue
+            if day in days:
+                floor_by_day[day] = floor
+            if balance < 0 or (day in days and floor < 0):
+                fail(
+                    "funding_availability",
+                    "The identified fund lacks supported cash at a historical boundary",
+                    {
+                        "fund_id": fund,
+                        "date": day,
+                        "closing_cents": balance,
+                        "withdrawal_day_floor_cents": floor if day in days else None,
+                    },
+                )
+            closing_minimum = (
+                balance if closing_minimum is None else min(closing_minimum, balance)
+            )
+        proofs.append(
+            {
+                "fund_id": fund,
+                "minimum_closing_cents": closing_minimum,
+                "withdrawal_day_floor_cents": floor_by_day,
+            }
+        )
+    return proofs

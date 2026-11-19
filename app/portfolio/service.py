@@ -17,7 +17,10 @@ from app.models.accounts import Account, AccountType
 from app.models.transactions import Transaction, TransactionLine
 from app.services.accounting import create_journal_entry
 from app.portfolio import models as m, schemas as s
-from app.portfolio.outgoing_funding import resolve_outgoing_funding_source
+from app.portfolio.outgoing_funding import (
+    resolve_outgoing_funding_source,
+    resolve_outgoing_funding_batch,
+)
 
 
 class Problem(ValueError):
@@ -1704,6 +1707,7 @@ def execute(db, command, actor="codex"):
             "resolve_historical_shortage",
             "resolve_loan_funding_source",
             "resolve_outgoing_funding_source",
+            "resolve_outgoing_funding_batch",
         }
         from contextlib import nullcontext
         from app.portfolio.review_effects import ReviewEffects
@@ -3711,6 +3715,7 @@ OPERATIONS["resolve_loan_funding_source"] = resolve_loan_funding_source
 
 
 OPERATIONS["resolve_outgoing_funding_source"] = resolve_outgoing_funding_source
+OPERATIONS["resolve_outgoing_funding_batch"] = resolve_outgoing_funding_batch
 
 
 # Reviewed statement revisions are metadata-only and preserve every old snapshot.

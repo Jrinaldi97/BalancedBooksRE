@@ -437,3 +437,51 @@ with _startup_lock(root):
     settings = dotenv_values(tmp_path / "settings.env")
     assert len(settings["SESSION_SECRET_KEY"]) == 64
     assert len(settings["PAYROLL_ENCRYPTION_SECRET"]) == 64
+
+
+def test_missing_native_selection_recovers_only_a_registered_existing_company(tmp_path):
+    path = tmp_path / "companies"
+    path.mkdir()
+    (path / "chosen.db").touch()
+    registry = tmp_path / "companies.json"
+    for selected in (None, "missing.db"):
+        registry.write_text(
+            json.dumps(
+                {
+                    "companies": [{"file": "chosen.db"}, {"file": "missing.db"}],
+                    "last_opened": selected,
+                }
+            )
+        )
+        with pytest.raises(ValueError):
+            selected_company(tmp_path)
+        assert not (tmp_path / "portfolio.db").exists()
+    registry.write_text(
+        json.dumps({"companies": [{"file": "chosen.db"}], "last_opened": "chosen.db"})
+    )
+    assert selected_company(tmp_path) == "chosen.db"
+    (tmp_path / "ai-connection.token").touch()
+    with pytest.raises(ValueError, match="original company file"):
+        company_paths(tmp_path, "portfolio.db")
+
+
+def test_existing_identity_can_be_read_while_another_connection_writes(
+    tmp_path, monkeypatch
+):
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+    import app.database as database
+    from app.models.settings import Settings
+    from balancedbooks_launcher import ensure_company_identity
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path/'company.db'}", connect_args={"timeout": 0.05}
+    )
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(database, "SessionLocal", factory)
+    Settings.__table__.create(engine)
+    ident = ensure_company_identity()
+    with factory() as writer:
+        writer.execute(text("BEGIN IMMEDIATE"))
+        assert ensure_company_identity() == ident
+    engine.dispose()
