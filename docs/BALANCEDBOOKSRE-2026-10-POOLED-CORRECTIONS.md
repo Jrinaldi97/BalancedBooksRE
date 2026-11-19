@@ -19,8 +19,6 @@ No successful historical correction is replayed automatically. No bulk review cl
 
 Synthetic regressions cover legacy three-line history, both statement bases, retries, unrelated/date/amount rejection, already-funded withdrawals, atomic deficit rejection, historical resolution with separate later shortage, loan provenance, preview rollback/commit, and MCP errors.
 
-On a fresh disposable Rinaldi Capital Group backup, Gibson observation 21276 passes the correction path. Hackensack 21285 correctly identifies an $89.99 source-fund deficit. Review 34568's dated assessment recognizes Boylston zero-net correction 29137. These rehearsals are rolled back; they are not live accounting corrections.
-
 Final focused acceptance suite: 67 passed. The broader suite recorded 3,792 passes and 204 environmental skips, with five environment-related failures: four OCR probes cannot traverse the root-owned mode-0700 `/usr/local/bin`, and a launcher process test was sandbox-restricted. OCR integration collection has the same host permission limitation. No OCR code or system permissions were changed in this scoped pass. Rehearsal rollback preserved all 119 database tables exactly by row-content hashes.
 
 The launcher regression suite passed outside the sandbox: 11 passed, 1 Windows-only skip. The remaining four broader-suite failures are the unchanged OCR host-permission limitation.
